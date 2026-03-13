@@ -19066,6 +19066,7 @@ document.addEventListener('DOMContentLoaded', ()=>{
       const fbName  = fbUser.displayName || fbUser.email.split('@')[0];
       const fbEmail = fbUser.email;
 
+      // ── Create or verify owner record ──
       if (!AUTH.hasOwner()) {
         AUTH.createOwner(fbEmail, fbName);
       } else {
@@ -19079,17 +19080,41 @@ document.addEventListener('DOMContentLoaded', ()=>{
       let s = AUTH.getSession();
       if (!s) s = AUTH.loginOwnerGoogle({ email: fbEmail, name: fbName });
 
-      if (s) {
-        const setupScreen = document.getElementById('setupScreen');
-        const loginScreen = document.getElementById('loginScreen');
-        if (setupScreen) setupScreen.classList.add('hidden');
-        if (loginScreen) loginScreen.classList.add('hidden');
-        APP.applySession(s);
-        APP.launch();
-        if(window.DEV_MODE) console.log('[Firebase Auth] ✓ App launched for:', fbEmail);
-      } else {
+      if (!s) {
         console.error('[Firebase Auth] Could not create local session.');
+        return;
       }
+
+      // §v1.2.02-FIX: Check if store setup is complete.
+      // On first login ever, setupDone is false — show step 2 (store details) not full launch.
+      const cfg = getCfg();
+      if (!cfg.setupDone) {
+        // Hide login, show setup screen at step 2 (store details)
+        const loginScreen  = document.getElementById('loginScreen');
+        const setupScreen  = document.getElementById('setupScreen');
+        if (loginScreen)  loginScreen.classList.add('hidden');
+        if (setupScreen)  setupScreen.classList.remove('hidden');
+        // Activate step 2 panel
+        ['sp1','sp2'].forEach(function(p){ const el=document.getElementById(p); if(el) el.classList.remove('act'); });
+        const sp2 = document.getElementById('sp2'); if(sp2) sp2.classList.add('act');
+        ['d1','d2'].forEach(function(d){ const el=document.getElementById(d); if(el){ el.classList.remove('act','done'); }});
+        const d2 = document.getElementById('d2'); if(d2){ d2.classList.add('act'); }
+        // Pre-fill owner badge
+        const badge = document.getElementById('ownerConfBadge');
+        if(badge){ badge.textContent = '✓ ' + fbName + ' (' + fbEmail + ')'; badge.style.display = 'block'; }
+        APP.applySession(s);
+        if(window.DEV_MODE) console.log('[Firebase Auth] First-time setup — showing store details for:', fbEmail);
+        return;
+      }
+
+      // ── Setup complete — launch the app normally ──
+      const setupScreen = document.getElementById('setupScreen');
+      const loginScreen = document.getElementById('loginScreen');
+      if (setupScreen) setupScreen.classList.add('hidden');
+      if (loginScreen) loginScreen.classList.add('hidden');
+      APP.applySession(s);
+      APP.launch();
+      if(window.DEV_MODE) console.log('[Firebase Auth] ✓ App launched for:', fbEmail);
     } catch(launchErr) {
       console.error('[Firebase Auth] Launch error:', launchErr);
     }
