@@ -6182,8 +6182,9 @@ const GOOGLE_AUTH = {
     }
   },
 
-  // ── REDIRECT-BASED OAUTH — No popups, works in all browsers ──
-  // Flow: click → redirect to Google → Google redirects back → process token in URL hash
+  // ── POPUP-FIRST OAUTH — tries popup, falls back to redirect if blocked ──
+  // Flow (popup): click → popup opens Google → token returned in popup URL hash → popup closes
+  // Flow (redirect fallback): click → redirect to Google → Google redirects back → process token in URL hash
   init(mode){
     this._mode = mode;
     const cid = this._getClientId();
@@ -6191,10 +6192,70 @@ const GOOGLE_AUTH = {
       this._showClientIdSetup(mode);
       return;
     }
-    this._redirectToGoogle(cid, mode);
+    this._signInWithPopup(cid, mode);
   },
 
-  // ── Build redirect URL and navigate to Google OAuth ──
+  // ── Attempt popup-based OAuth; fall back to redirect if popup is blocked ──
+  _signInWithPopup(cid, mode){
+    try{ sessionStorage.setItem('spos_oauth_mode', mode); }catch(_){}
+
+    const redirectUri = window.location.href.split('#')[0].split('?')[0];
+    const nonce = Math.random().toString(36).slice(2) + Date.now().toString(36);
+    try{ sessionStorage.setItem('spos_oauth_nonce', nonce); }catch(_){}
+
+    const params = new URLSearchParams({
+      client_id:     cid,
+      redirect_uri:  redirectUri,
+      response_type: 'token id_token',
+      scope:         'openid email profile https://www.googleapis.com/auth/drive.file https://www.googleapis.com/auth/spreadsheets',
+      nonce:         nonce,
+      state:         mode,
+      include_granted_scopes: 'true',
+      prompt:        'select_account'
+    });
+
+    const authUrl = 'https://accounts.google.com/o/oauth2/v2/auth?' + params.toString();
+
+    // Try popup first
+    const w = 500, h = 600;
+    const left = Math.max(0, Math.round(screen.width / 2 - w / 2));
+    const top  = Math.max(0, Math.round(screen.height / 2 - h / 2));
+    const popup = window.open(authUrl, 'gauth_popup',
+      `width=${w},height=${h},left=${left},top=${top},resizable=yes,scrollbars=yes`);
+
+    // If popup was blocked, fall back to redirect
+    if(!popup || popup.closed || typeof popup.closed === 'undefined'){
+      this._redirectToGoogle(cid, mode);
+      return;
+    }
+
+    // Poll for popup completion — watch for our redirect_uri to appear in popup location
+    const pollTimer = setInterval(()=>{
+      try{
+        if(popup.closed){
+          clearInterval(pollTimer);
+          return;
+        }
+        const popupHref = popup.location.href;
+        if(popupHref && popupHref.startsWith(redirectUri) &&
+           (popupHref.includes('access_token') || popupHref.includes('id_token') || popupHref.includes('error'))){
+          clearInterval(pollTimer);
+          const hash = popup.location.hash;
+          popup.close();
+          // Inject hash into our window and process it
+          history.replaceState(null, '', window.location.pathname + window.location.search + hash);
+          this.handleRedirectReturn();
+        }
+      }catch(e){
+        // Cross-origin access blocked — popup is on Google's domain, still in progress
+      }
+    }, 300);
+
+    // Timeout safety — if popup is still open after 5 min, clean up
+    setTimeout(()=>{ clearInterval(pollTimer); try{ if(!popup.closed) popup.close(); }catch(_){} }, 300000);
+  },
+
+  // ── Build redirect URL and navigate to Google OAuth (fallback) ──
   _redirectToGoogle(cid, mode){
     // Save mode so we know what to do after redirect
     try{ sessionStorage.setItem('spos_oauth_mode', mode); }catch(_){}
