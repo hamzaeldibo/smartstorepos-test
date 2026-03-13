@@ -6195,8 +6195,19 @@ const GOOGLE_AUTH = {
     this._signInWithPopup(cid, mode);
   },
 
-  // ── Attempt popup-based OAuth; fall back to redirect if popup is blocked ──
+  // ── Detect mobile/Android — popups don't work reliably on mobile browsers ──
+  _isMobile(){
+    return /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent);
+  },
+
+  // ── Attempt popup-based OAuth on desktop; use redirect directly on mobile ──
   _signInWithPopup(cid, mode){
+    // On mobile (Android/iOS), skip popup entirely — go straight to redirect
+    if(this._isMobile()){
+      this._redirectToGoogle(cid, mode);
+      return;
+    }
+
     try{ sessionStorage.setItem('spos_oauth_mode', mode); }catch(_){}
 
     const redirectUri = window.location.href.split('#')[0].split('?')[0];
@@ -6216,14 +6227,14 @@ const GOOGLE_AUTH = {
 
     const authUrl = 'https://accounts.google.com/o/oauth2/v2/auth?' + params.toString();
 
-    // Try popup first
+    // Try popup (desktop only)
     const w = 500, h = 600;
     const left = Math.max(0, Math.round(screen.width / 2 - w / 2));
     const top  = Math.max(0, Math.round(screen.height / 2 - h / 2));
     const popup = window.open(authUrl, 'gauth_popup',
       `width=${w},height=${h},left=${left},top=${top},resizable=yes,scrollbars=yes`);
 
-    // If popup was blocked, fall back to redirect
+    // If popup was blocked by browser, fall back to redirect
     if(!popup || popup.closed || typeof popup.closed === 'undefined'){
       this._redirectToGoogle(cid, mode);
       return;
