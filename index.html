@@ -3970,9 +3970,9 @@ const CALC_CACHE = {
     }catch(_){ return null; }
   },
   getOrRebuild(){ const c=this.get(); return this.isValid(c)?c:this.rebuild(); },
-  onSale(grandCents){
+  onSale(grandCents, debtCents=0){
     try{ const s=this.get(); if(!s) return; const ev=EVENTS.all(); const n=ev[0];
-      s.totalSalesCents+=grandCents; s.lastEventId=n?n.id:s.lastEventId; s.lastEventTimestamp=n?n.timestamp:s.lastEventTimestamp; s.builtAt=new Date().toISOString(); this.set(s);
+      s.totalSalesCents+=grandCents; s.netRemainingDebtCents+=debtCents; s.lastEventId=n?n.id:s.lastEventId; s.lastEventTimestamp=n?n.timestamp:s.lastEventTimestamp; s.builtAt=new Date().toISOString(); this.set(s);
     }catch(_){}
   },
   onExpense(amtCents){
@@ -6182,9 +6182,8 @@ const GOOGLE_AUTH = {
     }
   },
 
-  // ── POPUP-FIRST OAUTH — tries popup, falls back to redirect if blocked ──
-  // Flow (popup): click → popup opens Google → token returned in popup URL hash → popup closes
-  // Flow (redirect fallback): click → redirect to Google → Google redirects back → process token in URL hash
+  // ── REDIRECT-BASED OAUTH — No popups, works in all browsers ──
+  // Flow: click → redirect to Google → Google redirects back → process token in URL hash
   init(mode){
     this._mode = mode;
     const cid = this._getClientId();
@@ -6192,81 +6191,10 @@ const GOOGLE_AUTH = {
       this._showClientIdSetup(mode);
       return;
     }
-    this._signInWithPopup(cid, mode);
+    this._redirectToGoogle(cid, mode);
   },
 
-  // ── Detect mobile/Android — popups don't work reliably on mobile browsers ──
-  _isMobile(){
-    return /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent);
-  },
-
-  // ── Attempt popup-based OAuth on desktop; use redirect directly on mobile ──
-  _signInWithPopup(cid, mode){
-    // On mobile (Android/iOS), skip popup entirely — go straight to redirect
-    if(this._isMobile()){
-      this._redirectToGoogle(cid, mode);
-      return;
-    }
-
-    try{ sessionStorage.setItem('spos_oauth_mode', mode); }catch(_){}
-
-    const redirectUri = window.location.href.split('#')[0].split('?')[0];
-    const nonce = Math.random().toString(36).slice(2) + Date.now().toString(36);
-    try{ sessionStorage.setItem('spos_oauth_nonce', nonce); }catch(_){}
-
-    const params = new URLSearchParams({
-      client_id:     cid,
-      redirect_uri:  redirectUri,
-      response_type: 'token id_token',
-      scope:         'openid email profile https://www.googleapis.com/auth/drive.file https://www.googleapis.com/auth/spreadsheets',
-      nonce:         nonce,
-      state:         mode,
-      include_granted_scopes: 'true',
-      prompt:        'select_account'
-    });
-
-    const authUrl = 'https://accounts.google.com/o/oauth2/v2/auth?' + params.toString();
-
-    // Try popup (desktop only)
-    const w = 500, h = 600;
-    const left = Math.max(0, Math.round(screen.width / 2 - w / 2));
-    const top  = Math.max(0, Math.round(screen.height / 2 - h / 2));
-    const popup = window.open(authUrl, 'gauth_popup',
-      `width=${w},height=${h},left=${left},top=${top},resizable=yes,scrollbars=yes`);
-
-    // If popup was blocked by browser, fall back to redirect
-    if(!popup || popup.closed || typeof popup.closed === 'undefined'){
-      this._redirectToGoogle(cid, mode);
-      return;
-    }
-
-    // Poll for popup completion — watch for our redirect_uri to appear in popup location
-    const pollTimer = setInterval(()=>{
-      try{
-        if(popup.closed){
-          clearInterval(pollTimer);
-          return;
-        }
-        const popupHref = popup.location.href;
-        if(popupHref && popupHref.startsWith(redirectUri) &&
-           (popupHref.includes('access_token') || popupHref.includes('id_token') || popupHref.includes('error'))){
-          clearInterval(pollTimer);
-          const hash = popup.location.hash;
-          popup.close();
-          // Inject hash into our window and process it
-          history.replaceState(null, '', window.location.pathname + window.location.search + hash);
-          this.handleRedirectReturn();
-        }
-      }catch(e){
-        // Cross-origin access blocked — popup is on Google's domain, still in progress
-      }
-    }, 300);
-
-    // Timeout safety — if popup is still open after 5 min, clean up
-    setTimeout(()=>{ clearInterval(pollTimer); try{ if(!popup.closed) popup.close(); }catch(_){} }, 300000);
-  },
-
-  // ── Build redirect URL and navigate to Google OAuth (fallback) ──
+  // ── Build redirect URL and navigate to Google OAuth ──
   _redirectToGoogle(cid, mode){
     // Save mode so we know what to do after redirect
     try{ sessionStorage.setItem('spos_oauth_mode', mode); }catch(_){}
@@ -8759,8 +8687,8 @@ const POS = {
       const savedInv = DB.all('INVOICES').find(i=>i.num===num);
       if(savedInv) setTimeout(()=>DRIVE_SYNC.quickSync('SALE',{inv:savedInv}), 1000);
     }
-    // §v1.1.98-CACHE: update snapshot incrementally after sale
-    try{ CALC_CACHE.onSale(grandCents); }catch(_){}
+    // §v1.1.99-CACHE: update snapshot incrementally after sale (debtCents for credit/partial)
+    try{ CALC_CACHE.onSale(grandCents, Math.round(remain*100)); }catch(_){}
   },
   clear(){ CART=[]; clearCartStorage(); PAY_TYPE='cash'; document.querySelectorAll('.ptbtn').forEach(b=>b.classList.remove('act')); const first=document.querySelector('.ptbtn'); if(first) first.classList.add('act'); const pw=document.getElementById('partialWrap'); if(pw) pw.style.display='none'; UI.setVal('billCust',''); UI.setVal('billCustCode',''); UI.setVal('tDisc','0'); const cs=document.getElementById('custSuggest'); if(cs) cs.style.display='none'; const bn=document.getElementById('billNotes'); if(bn) bn.value=''; this.renderBill(); },
   suggestCustomer(q){
@@ -9302,6 +9230,8 @@ const INVS = {
     }, AUTH.getSession()?.id);
 
     TOAST.ok(`✓ تم إلغاء الفاتورة ${inv.num} — تم تحديث المخزون والحسابات`);
+    // §v1.1.99-CACHE: void removes a sale (and possibly debt) — invalidate so next Dashboard load rebuilds
+    try{ CALC_CACHE.invalidate(); }catch(_){}
     this.render();
     // §PHASE2A: Refresh customer totals so voided invoice no longer counts
     try{ CUST_PAGE.render(); }catch(_){}
@@ -9818,6 +9748,8 @@ const RETS = {
           items:selectedItems.length, cashier:sess.name,
           invoicePayType:_retInvRef.payType
         }, sess.id);
+        // §v1.1.99-CACHE: return affects sales/debt totals — invalidate so next Dashboard load rebuilds
+        try{ CALC_CACHE.invalidate(); }catch(_){}
 
         // ── 5. Sync status ──
         try{ CALC.syncInvoiceStatus(_retInvRef.id); }catch(_syncErr){ console.warn('[RETS.save] syncInvoiceStatus non-critical error:', _syncErr.message); }
@@ -9867,6 +9799,8 @@ const RETS = {
     const r = { type:'مرتجع مبيع', date:todayISO(), customer:'', inv:_legacyInvNum, amt:0, method:UI.val('rMeth')||'cash', reason:UI.val('rReason')||'أخرى', status:'قيد المعالجة', invoicePayType:_legacyPayType, originalPaymentMethod:_legacyPayType };
     const saved=DB.insert('RETURNS',r);
     EVENTS.log('RETURN',{ id:saved.id, reason:r.reason, amt:r.amt },sess?.id);
+    // §v1.1.99-CACHE: return affects sales/debt totals — invalidate so next Dashboard load rebuilds
+    try{ CALC_CACHE.invalidate(); }catch(_){}
     UI.closeModal('retModal');
     UI.updateBadges(); TOAST.ok('✓ تم تسجيل المرتجع'); this.render();
   },
@@ -19321,9 +19255,9 @@ document.addEventListener('DOMContentLoaded', ()=>{
     if(window.DEV_MODE) console.log('[LicenseWatchdog] Started — checks every 24h + on reconnect');
   };
 
-  // ── 2. Hijack loginGoogleBtn to use Firebase popup ──
+  // ── 2. Hijack loginGoogleBtn to use Firebase redirect ──
   document.addEventListener('DOMContentLoaded', function() {
-    // §v1.1.51: Attach Firebase popup handler to BOTH login and setup Google buttons
+    // §v1.1.99: Switched from signInWithPopup to signInWithRedirect (popup URI not available on Netlify)
     ['loginGoogleBtn', 'setupGoogleBtn'].forEach(function(btnId) {
       const btn = document.getElementById(btnId);
       if (!btn) return;
@@ -19338,28 +19272,7 @@ document.addEventListener('DOMContentLoaded', ()=>{
         btn.disabled = true;
         btn.style.opacity = '0.6';
 
-        _fbAuth.signInWithPopup(provider)
-          .then(function(result) {
-            if(window.DEV_MODE) console.log('[Firebase Auth] Popup sign-in success:', result.user.email);
-            // onAuthStateChanged will handle launch
-          })
-          .catch(function(err) {
-            btn.disabled = false;
-            btn.style.opacity = '';
-            if (err.code === 'auth/popup-closed-by-user' || err.code === 'auth/cancelled-popup-request') {
-              console.info('[Firebase Auth] Popup closed by user.');
-            } else if (err.code === 'auth/popup-blocked') {
-              console.warn('[Firebase Auth] Popup blocked — falling back to redirect.');
-              _fbAuth.signInWithRedirect(provider);
-            } else {
-              console.error('[Firebase Auth] Sign-in error:', err);
-              const lErr = document.getElementById('lErr');
-              if (lErr) {
-                lErr.textContent = 'فشل تسجيل الدخول: ' + (err.message || err.code);
-                lErr.classList.add('show');
-              }
-            }
-          });
+        _fbAuth.signInWithRedirect(provider);
       }, true); // capture phase — fires before any inline onclick
     });
   });
