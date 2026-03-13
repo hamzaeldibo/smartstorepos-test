@@ -7466,6 +7466,8 @@ const APP = {
     document.getElementById('loginScreen').classList.add('hidden');
     document.getElementById('main').style.display = '';
     document.getElementById('sidebar').style.display = '';
+    // §v1.2.03-FIX: Always close sidebar on launch — on mobile it must start hidden
+    try{ closeSB(); }catch(_){}
     this.populateCats();
     // §FIX-CRITICAL-2: Sync customers from invoices once at launch (not in render)
     setTimeout(()=>{ try{ CUST_PAGE.syncCustomersFromInvoices(); }catch(_){} }, 500);
