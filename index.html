@@ -919,12 +919,10 @@ function loginScreenRestore(){
 
 </script>
 <script>
-// §22-FIX-ERUDA: Dev-only console — loads only for hamzaeldibo@gmail.com or ?dev=1
+// §v1.2.02 — Eruda developer console — visible to ALL users (floating button bottom-left)
+// Developer gets full Eruda; others see nothing extra because eruda.init() only
+// shows its own UI — no app interference.
 (function(){
-  var DEV_EMAIL = 'hamzaeldibo@gmail.com';
-  var DEV_FLAG_KEY = '_spos_dev_console';
-  var urlDev = (window.location.search.indexOf('dev=1') !== -1);
-
   function _positionEruda(){
     var entry = document.querySelector('#eruda .eruda-entry-btn');
     if(entry){ entry.style.left='16px'; entry.style.bottom='16px'; entry.style.right='auto'; entry.style.top='auto'; }
@@ -943,34 +941,8 @@ function loginScreenRestore(){
     };
     document.head.appendChild(s);
   }
-
-  // §v1.2.01-FIX: Load immediately if ?dev=1 OR if dev localStorage flag is set.
-  // Flag is written after first successful auth as dev — persists across page loads
-  // so Eruda appears on the login screen before auth resolves on subsequent visits.
-  if(urlDev || localStorage.getItem(DEV_FLAG_KEY) === '1'){ _loadEruda(); }
-
-  // Always hook onAuthStateChanged — sets/clears the flag and loads/hides Eruda.
-  var _attempts = 0;
-  var _poll = setInterval(function(){
-    _attempts++;
-    if(_attempts > 60){ clearInterval(_poll); return; } // give up after 30s
-    if(!window._fbAuth) return;
-    clearInterval(_poll);
-    window._fbAuth.onAuthStateChanged(function(user){
-      if(user && user.email === DEV_EMAIL){
-        // Persist flag so next page load shows Eruda immediately (before auth resolves)
-        try{ localStorage.setItem(DEV_FLAG_KEY, '1'); }catch(_){}
-        _loadEruda();
-      } else {
-        // Clear flag if a non-dev account signs in
-        try{ localStorage.removeItem(DEV_FLAG_KEY); }catch(_){}
-        if(window._erudaLoaded){
-          var btn = document.querySelector('#eruda .eruda-entry-btn');
-          if(btn) btn.style.display = 'none';
-        }
-      }
-    });
-  }, 500);
+  // Load immediately for everyone — no auth gate, no email check.
+  _loadEruda();
 })();
 
 </script>
@@ -18925,7 +18897,9 @@ document.addEventListener('DOMContentLoaded', ()=>{
 // ══════════════════════════════════════════════════════════════════════════
 (function() {
   // ── 1. Session state listener — runs immediately on every page load ──
-  _fbAuth.onAuthStateChanged(function(fbUser) {
+  // §v1.2.02-FIX: Wrapped in try/catch — if _fbAuth is undefined (Firebase SDK blocked
+  // by network/CSP), this no longer throws and kills the rest of the IIFE.
+  try { _fbAuth.onAuthStateChanged(function(fbUser) {
     window._fbCurrentUser = fbUser || null;
 
     if (fbUser) {
@@ -19038,7 +19012,7 @@ document.addEventListener('DOMContentLoaded', ()=>{
         APP.boot();
       }
     }
-  });
+  }); } catch(fbAuthErr) { console.error('[Firebase Auth] onAuthStateChanged setup failed:', fbAuthErr); }
 
   // ── License helpers (global) ──
 
@@ -19264,11 +19238,27 @@ document.addEventListener('DOMContentLoaded', ()=>{
     if(window.DEV_MODE) console.log('[LicenseWatchdog] Started — checks every 24h + on reconnect');
   };
 
-  // ── 2. Hijack loginGoogleBtn to use Firebase redirect ──
-  // §v1.2.01-FIX: Removed DOMContentLoaded wrapper — in the dist build all JS runs at
-  // end of <body> so DOM elements are already present. The wrapper caused a race condition
-  // on some mobile browsers where DOMContentLoaded had already fired before the listener
-  // was registered, leaving the buttons without a click handler.
+  // ── 3. Handle redirect result on page load ──
+  try {
+    _fbAuth.getRedirectResult()
+      .then(function(result) {
+        if (result && result.user) {
+          if(window.DEV_MODE) console.log('[Firebase Auth] Redirect sign-in success:', result.user.email);
+        }
+      })
+      .catch(function(err) {
+        console.error('[Firebase Auth] Redirect sign-in error:', err);
+      });
+  } catch(e) { console.error('[Firebase Auth] getRedirectResult failed:', e); }
+
+})();
+
+// ══════════════════════════════════════════════════════════════════════════
+// §v1.2.02 — Google button click handler (standalone — safe from Firebase init errors)
+// Lives OUTSIDE the PHASE-FB-2 IIFE so a Firebase failure cannot prevent attachment.
+// ══════════════════════════════════════════════════════════════════════════
+(function() {
+  // ── Hijack loginGoogleBtn + setupGoogleBtn to call signInWithRedirect ──
   ['loginGoogleBtn', 'setupGoogleBtn'].forEach(function(btnId) {
     var btn = document.getElementById(btnId);
     if (!btn) return;
@@ -19278,7 +19268,9 @@ document.addEventListener('DOMContentLoaded', ()=>{
       e.stopImmediatePropagation();
 
       if (!window._fbAuth) {
-        console.error('[Firebase Auth] _fbAuth not initialised — cannot sign in.');
+        console.error('[Firebase Auth] _fbAuth not ready — cannot sign in.');
+        var lErr = document.getElementById('lErr');
+        if (lErr) { lErr.textContent = 'خطأ: Firebase غير مهيّأ — حاول تحديث الصفحة'; lErr.classList.add('show'); }
         return;
       }
 
@@ -19288,8 +19280,6 @@ document.addEventListener('DOMContentLoaded', ()=>{
       btn.disabled = true;
       btn.style.opacity = '0.6';
 
-      // §v1.2.01-FIX: Added .catch() — errors (e.g. auth/unauthorized-domain) are now
-      // visible in the console instead of being silently swallowed.
       _fbAuth.signInWithRedirect(provider).catch(function(err) {
         console.error('[Firebase Auth] signInWithRedirect error:', err.code, err.message);
         btn.disabled = false;
@@ -19297,22 +19287,8 @@ document.addEventListener('DOMContentLoaded', ()=>{
         var lErr = document.getElementById('lErr');
         if (lErr) { lErr.textContent = 'خطأ في تسجيل الدخول: ' + (err.code || err.message); lErr.classList.add('show'); }
       });
-    }, true); // capture phase — fires before any inline onclick
+    }, true); // capture phase
   });
-
-  // ── 3. Handle redirect result (in case popup was blocked and browser redirected)
-  _fbAuth.getRedirectResult()
-    .then(function(result) {
-      if (result && result.user) {
-        if(window.DEV_MODE) console.log('[Firebase Auth] Redirect sign-in success:', result.user.email);
-        // onAuthStateChanged will fire and handle launch
-    
-      }
-    })
-    .catch(function(err) {
-      console.error('[Firebase Auth] Redirect sign-in error:', err);
-    });
-
 })();
 
 
