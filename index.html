@@ -19279,11 +19279,13 @@ document.addEventListener('DOMContentLoaded', ()=>{
 })();
 
 // ══════════════════════════════════════════════════════════════════════════
-// §v1.2.02 — Google button click handler (standalone — safe from Firebase init errors)
-// Lives OUTSIDE the PHASE-FB-2 IIFE so a Firebase failure cannot prevent attachment.
+// §v1.2.03 — Google button click handler — signInWithPopup (primary)
+// signInWithRedirect was unreliable: modern browsers block the cross-origin
+// cookies Firebase v8 uses to pass auth state back, so getRedirectResult()
+// always returned null. Now that the domain is authorised in Firebase Console,
+// signInWithPopup works correctly and is the right method to use.
 // ══════════════════════════════════════════════════════════════════════════
 (function() {
-  // ── Hijack loginGoogleBtn + setupGoogleBtn to call signInWithRedirect ──
   ['loginGoogleBtn', 'setupGoogleBtn'].forEach(function(btnId) {
     var btn = document.getElementById(btnId);
     if (!btn) return;
@@ -19305,13 +19307,26 @@ document.addEventListener('DOMContentLoaded', ()=>{
       btn.disabled = true;
       btn.style.opacity = '0.6';
 
-      _fbAuth.signInWithRedirect(provider).catch(function(err) {
-        console.error('[Firebase Auth] signInWithRedirect error:', err.code, err.message);
-        btn.disabled = false;
-        btn.style.opacity = '';
-        var lErr = document.getElementById('lErr');
-        if (lErr) { lErr.textContent = 'خطأ في تسجيل الدخول: ' + (err.code || err.message); lErr.classList.add('show'); }
-      });
+      _fbAuth.signInWithPopup(provider)
+        .then(function(result) {
+          if(window.DEV_MODE) console.log('[Firebase Auth] Popup sign-in success:', result.user.email);
+          // onAuthStateChanged will fire and drive the full launch flow
+        })
+        .catch(function(err) {
+          btn.disabled = false;
+          btn.style.opacity = '';
+          if (err.code === 'auth/popup-closed-by-user' || err.code === 'auth/cancelled-popup-request') {
+            console.info('[Firebase Auth] Popup closed by user.');
+          } else if (err.code === 'auth/popup-blocked') {
+            // Fallback to redirect if popup is blocked by browser
+            console.warn('[Firebase Auth] Popup blocked — falling back to redirect.');
+            _fbAuth.signInWithRedirect(provider);
+          } else {
+            console.error('[Firebase Auth] Sign-in error:', err.code, err.message);
+            var lErr = document.getElementById('lErr');
+            if (lErr) { lErr.textContent = 'خطأ في تسجيل الدخول: ' + (err.code || err.message); lErr.classList.add('show'); }
+          }
+        });
     }, true); // capture phase
   });
 })();
