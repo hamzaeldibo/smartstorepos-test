@@ -1262,7 +1262,7 @@ function loginScreenRestore(){
 <!-- ═══ SETUP SCREEN (First Launch) ═══ -->
 <div class="screen" id="setupScreen">
   <div class="glass">
-    <div class="logo-c"><span class="em">🏪</span><h1>SmartStorePOS Gold</h1><p class="sub">نظام إدارة المتاجر الذكي</p><span class="vbadge">v1.1.99 — §FIX: CACHE onSale debt · RETS.save invalidate · voidInvoice invalidate</span></div>
+    <div class="logo-c"><span class="em">🏪</span><h1>SmartStorePOS Gold</h1><p class="sub">نظام إدارة المتاجر الذكي</p><span class="vbadge">v1.1.100 — §FIX: INITIAL stock movement · rebuild preserves legacy stock</span></div>
     <div class="sdots"><div class="sdot act" id="d1"></div><div class="sdot" id="d2"></div></div>
 
     <!-- Step 1: Owner Google Login (sp0 removed — info merged into login card) -->
@@ -4335,7 +4335,7 @@ function nowLocalFull(){
 // Schema version: bumped when DB structure changes.
 // ════════════════════════════════════════════════════════════════════
 const SCHEMA_VERSION = 3; // v3: integer cents storage, timestamp seq, two-phase migration
-const APP_VERSION    = '1.1.99'; // §v1.1.99: CACHE fixes — onSale debtCents; RETS.save invalidate | §v1.1.98: CALC_CACHE snapshot | §v1.1.97: EXPENSE_DELETED; hash chain
+const APP_VERSION    = '1.1.100'; // §v1.1.100: INITIAL movement on product create; rebuildStock preserves legacy stock | §v1.1.99: CACHE fixes; PIN fix
 // ═══════════════════════════════════════════════════════════════════════
 // §ROOT-CAUSE-FIX v10.8 — NOTES/RETURNS UI NOT UPDATING (FINAL FIX)
 // ───────────────────────────────────────────────────────────────────────
@@ -9922,7 +9922,19 @@ const PRODS = {
       DB.update('PRODUCTS',editId,{...obj, stock:stockToUse});
       EVENTS.log('UPDATE_PRODUCT',{name,code,priceR:obj.priceR,stock:stockToUse},s?.id);
     }
-    else{ const np=DB.insert('PRODUCTS',{...obj, stock:parseInt(UI.val('pInitStock'))||0}); EVENTS.log('CREATE_PRODUCT',{name,code},s?.id); }
+    else{
+      const initStock = parseInt(UI.val('pInitStock'))||0;
+      const np = DB.insert('PRODUCTS',{...obj, stock:initStock});
+      // §v1.1.100-FIX1: Record INITIAL movement so rebuildStockFromMovements() preserves this stock
+      if(initStock > 0){
+        DB.insert('INVENTORY_MOVEMENTS',{
+          productId: np.id, type:'INITIAL', qty: initStock,
+          sourceId: 'initial_stock', reason: 'مخزون ابتدائي عند إنشاء المنتج',
+          timestamp: _TS ? _TS.now() : new Date().toISOString()
+        });
+      }
+      EVENTS.log('CREATE_PRODUCT',{name,code,initStock},s?.id);
+    }
     UI.closeModal('prodModal'); this.render(); TOAST.ok('✓ تم حفظ المنتج');
   },
   del(id){
@@ -11384,6 +11396,11 @@ const FINANCIAL_ENGINE = {
     const movements = DB.all('INVENTORY_MOVEMENTS')
       .sort((a,b)=>(a.timestamp||'').localeCompare(b.timestamp||''));
     if(!movements.length) return { rebuilt:false, reason:'no_movements' };
+
+    // §v1.1.100-FIX2: Snapshot current stock BEFORE reset — preserves products with no movements
+    const preRebuildStock = {};
+    DB.all('PRODUCTS').forEach(p=>{ preRebuildStock[p.id] = parseFloat(p.stock||0); });
+
     // Reset all product stock to 0
     DB.all('PRODUCTS').forEach(p=> DB.update('PRODUCTS', p.id, { stock:0 }));
     // Replay movements in chronological order
@@ -11396,9 +11413,19 @@ const FINANCIAL_ENGINE = {
     Object.entries(stockMap).forEach(([pid, stock]) => {
       DB.update('PRODUCTS', pid, { stock: Math.max(0, Math.round(stock*1000)/1000) });
     });
+    // §v1.1.100-FIX2: Restore stock for products that had no movements (legacy products)
+    // These are products created before FIX1 — we trust their stored stock value
+    const noMovementPids = Object.keys(preRebuildStock).filter(pid => !stockMap[pid]);
+    noMovementPids.forEach(pid => {
+      const savedStock = preRebuildStock[pid];
+      if(savedStock > 0){
+        DB.update('PRODUCTS', pid, { stock: savedStock });
+        if(window.DEV_MODE) console.log('[rebuildStock] preserved legacy stock for', pid, '=', savedStock);
+      }
+    });
     // Only log when NOT in silent mode (e.g. not called from REFRESH_CTRL.hard)
-    if(!opts.silent) EVENTS.log('STOCK_REBUILT',{ products:Object.keys(stockMap).length, movements:movements.length }, 'system');
-    return { rebuilt:true, stockMap };
+    if(!opts.silent) EVENTS.log('STOCK_REBUILT',{ products:Object.keys(stockMap).length, movements:movements.length, legacyPreserved:noMovementPids.length }, 'system');
+    return { rebuilt:true, stockMap, legacyPreserved:noMovementPids.length };
   },
 
   // ══════════════════════════════════════════════════════════════════
