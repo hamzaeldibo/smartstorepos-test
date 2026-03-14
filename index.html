@@ -1262,7 +1262,7 @@ function loginScreenRestore(){
 <!-- ═══ SETUP SCREEN (First Launch) ═══ -->
 <div class="screen" id="setupScreen">
   <div class="glass">
-    <div class="logo-c"><span class="em">🏪</span><h1>SmartStorePOS Gold</h1><p class="sub">نظام إدارة المتاجر الذكي</p><span class="vbadge">v1.1.98 — §FIX: CALC_CACHE incremental snapshot · EXPENSE_DELETED · hash chain</span></div>
+    <div class="logo-c"><span class="em">🏪</span><h1>SmartStorePOS Gold</h1><p class="sub">نظام إدارة المتاجر الذكي</p><span class="vbadge">v1.1.99 — §FIX: CACHE onSale debt · RETS.save invalidate · voidInvoice invalidate</span></div>
     <div class="sdots"><div class="sdot act" id="d1"></div><div class="sdot" id="d2"></div></div>
 
     <!-- Step 1: Owner Google Login (sp0 removed — info merged into login card) -->
@@ -3829,9 +3829,11 @@ const CALC_CACHE = {
     }catch(_){ return null; }
   },
   getOrRebuild(){ const c=this.get(); return this.isValid(c)?c:this.rebuild(); },
-  onSale(grandCents){
+  onSale(grandCents, debtCents=0){ // §v1.1.99-FIX2: debtCents for credit/partial sales
     try{ const s=this.get(); if(!s) return; const ev=EVENTS.all(); const n=ev[0];
-      s.totalSalesCents+=grandCents; s.lastEventId=n?n.id:s.lastEventId; s.lastEventTimestamp=n?n.timestamp:s.lastEventTimestamp; s.builtAt=new Date().toISOString(); this.set(s);
+      s.totalSalesCents+=grandCents;
+      if(debtCents>0) s.netRemainingDebtCents+=debtCents; // increment debt for credit/partial
+      s.lastEventId=n?n.id:s.lastEventId; s.lastEventTimestamp=n?n.timestamp:s.lastEventTimestamp; s.builtAt=new Date().toISOString(); this.set(s);
     }catch(_){}
   },
   onExpense(amtCents){
@@ -4333,7 +4335,7 @@ function nowLocalFull(){
 // Schema version: bumped when DB structure changes.
 // ════════════════════════════════════════════════════════════════════
 const SCHEMA_VERSION = 3; // v3: integer cents storage, timestamp seq, two-phase migration
-const APP_VERSION    = '1.1.98'; // §v1.1.98: CALC_CACHE incremental snapshot | §v1.1.97: EXPENSE_DELETED log; RETURN_DEBT_ADJ hash chain | §v1.1.95: TOAST.err; Arabic PDFs; Admin stats; GSI guard
+const APP_VERSION    = '1.1.99'; // §v1.1.99: CACHE fixes — onSale debtCents; RETS.save invalidate | §v1.1.98: CALC_CACHE snapshot | §v1.1.97: EXPENSE_DELETED; hash chain
 // ═══════════════════════════════════════════════════════════════════════
 // §ROOT-CAUSE-FIX v10.8 — NOTES/RETURNS UI NOT UPDATING (FINAL FIX)
 // ───────────────────────────────────────────────────────────────────────
@@ -7596,10 +7598,24 @@ const DASH = {
     // Filter invoices by period
     const periodInvs = CALC.getSales().filter(i=>(!fromDate||i.date>=fromDate)&&(!toDate||i.date<=toDate));
     // §UNIFY-4: totalSales now via CALC.totalSales(fromDate,toDate) — single source of truth
-    const totalSales = CALC.totalSales(fromDate, toDate);
+    // §v1.1.98-CACHE-FIX3: use snapshot when no date filter (cache covers all-time totals only)
+    let totalSales, totalExp;
+    if(!fromDate && !toDate){
+      try{
+        const _snap = CALC_CACHE.getOrRebuild();
+        if(_snap && CALC_CACHE.isValid(_snap)){
+          totalSales = _snap.totalSalesCents / 100;
+          totalExp   = _snap.totalExpensesCents / 100;
+        } else { throw new Error('miss'); }
+      }catch(_){
+        totalSales = CALC.totalSales(fromDate, toDate);
+        totalExp   = CALC.totalExpenses(fromDate, toDate);
+      }
+    } else {
+      totalSales = CALC.totalSales(fromDate, toDate);
+      totalExp   = CALC.totalExpenses(fromDate, toDate);
+    }
     const totalDebt  = CALC.getOutstandingDebt(periodInvs).total; // §PHASE2: unified engine
-    // §UNIFY-4: totalExpenses now via CALC.totalExpenses(fromDate,toDate) — unified with date support
-    const totalExp   = CALC.totalExpenses(fromDate, toDate);
     // §PHASE5B: Dashboard COGS now delegates to CALC.totalCOGS() — single source of truth
     const totalCOGS  = CALC.totalCOGS(fromDate, toDate);
     // §PHASE4: classify returns — only cash returns reduce realized profit
@@ -8533,7 +8549,8 @@ const POS = {
       if(savedInv) setTimeout(()=>DRIVE_SYNC.quickSync('SALE',{inv:savedInv}), 1000);
     }
     // §v1.1.98-CACHE: update snapshot incrementally after sale
-    try{ CALC_CACHE.onSale(grandCents); }catch(_){}
+    // §v1.1.99-FIX2: pass remainCents so credit/partial sales also update debt in cache
+    try{ CALC_CACHE.onSale(grandCents, Math.round(remain*100)); }catch(_){}
   },
   clear(){ CART=[]; clearCartStorage(); PAY_TYPE='cash'; document.querySelectorAll('.ptbtn').forEach(b=>b.classList.remove('act')); const first=document.querySelector('.ptbtn'); if(first) first.classList.add('act'); const pw=document.getElementById('partialWrap'); if(pw) pw.style.display='none'; UI.setVal('billCust',''); UI.setVal('billCustCode',''); UI.setVal('tDisc','0'); const cs=document.getElementById('custSuggest'); if(cs) cs.style.display='none'; const bn=document.getElementById('billNotes'); if(bn) bn.value=''; this.renderBill(); },
   suggestCustomer(q){
@@ -9069,6 +9086,8 @@ const INVS = {
       invId: id, num: inv.num, total: inv.total,
       paid: inv.paid, payType: pType, cashAdjustment: paid
     }, AUTH.getSession()?.id);
+    // §v1.1.98-CACHE-FIX1: void changes sales total → invalidate snapshot
+    try{ CALC_CACHE.invalidate(); }catch(_){}
 
     TOAST.ok(`✓ تم إلغاء الفاتورة ${inv.num} — تم تحديث المخزون والحسابات`);
     this.render();
@@ -9587,6 +9606,8 @@ const RETS = {
           items:selectedItems.length, cashier:sess.name,
           invoicePayType:_retInvRef.payType
         }, sess.id);
+        // §v1.1.99-FIX3: return changes sales & possibly debt → invalidate cache
+        try{ CALC_CACHE.invalidate(); }catch(_){}
 
         // ── 5. Sync status ──
         try{ CALC.syncInvoiceStatus(_retInvRef.id); }catch(_syncErr){ console.warn('[RETS.save] syncInvoiceStatus non-critical error:', _syncErr.message); }
@@ -9636,6 +9657,8 @@ const RETS = {
     const r = { type:'مرتجع مبيع', date:todayISO(), customer:'', inv:_legacyInvNum, amt:0, method:UI.val('rMeth')||'cash', reason:UI.val('rReason')||'أخرى', status:'قيد المعالجة', invoicePayType:_legacyPayType, originalPaymentMethod:_legacyPayType };
     const saved=DB.insert('RETURNS',r);
     EVENTS.log('RETURN',{ id:saved.id, reason:r.reason, amt:r.amt },sess?.id);
+    // §v1.1.99-FIX3: return affects sales totals → invalidate cache
+    try{ CALC_CACHE.invalidate(); }catch(_){}
     UI.closeModal('retModal');
     UI.updateBadges(); TOAST.ok('✓ تم تسجيل المرتجع'); this.render();
   },
@@ -9816,6 +9839,8 @@ const RETS = {
     }, sess?.id);
 
     DB.delete('RETURNS',id);
+    // §v1.1.98-CACHE-FIX2: return deletion changes sales & debt → invalidate snapshot
+    try{ CALC_CACHE.invalidate(); }catch(_){}
     // Sync all
     CALC.syncAllDebts();
     UI.updateBadges();
@@ -15480,6 +15505,8 @@ const PURCHASE_INV = {
     }
     
     UI.closeModal('purchaseInvModal');
+    // §v1.1.99-AUDIT-FIX-A: purchase invoice adds stock cost → invalidate snapshot
+    try{ CALC_CACHE.invalidate(); }catch(_){}
     TOAST.ok('✅ تم حفظ فاتورة الشراء بنجاح');
   }
 };
@@ -16089,6 +16116,8 @@ const SUPPLIER_PAY = {
     }
     
     UI.closeModal('supplierPayModal');
+    // §v1.1.99-AUDIT-FIX-B: supplier payment changes financial position → invalidate snapshot
+    try{ CALC_CACHE.invalidate(); }catch(_){}
     TOAST.ok('✅ تم تسجيل الدفعة بنجاح');
   }
 };
@@ -16486,11 +16515,15 @@ const BKP_PAGE = {
     setTimeout(()=>this.render(),500);
   },
   exportOps(){
-    const pin=prompt('أدخل PIN المدير:')||'';
+    // §v1.1.99-FIX-PIN: only prompt for PIN when pinEnabled === true AND pin is set
+    const _cfg = getCfg();
+    const pin = (_cfg.pinEnabled === true && _cfg.pin) ? (prompt('أدخل PIN المدير:')||'') : '';
     BACKUP.exportOpsLog(pin);
   },
   exportTable(table){
-    const pin=prompt('أدخل PIN:')||'';
+    // §v1.1.99-FIX-PIN: only prompt for PIN when pinEnabled === true AND pin is set
+    const _cfg = getCfg();
+    const pin = (_cfg.pinEnabled === true && _cfg.pin) ? (prompt('أدخل PIN:')||'') : '';
     BACKUP.exportCSV(table,pin);
   },
 
