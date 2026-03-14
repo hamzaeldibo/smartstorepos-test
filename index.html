@@ -718,238 +718,7 @@
 <!-- Google Identity Services — Redirect OAuth 2.0 (cross-browser, no popups) -->
 <!-- GSI kept for renderButton as visual element only — all auth is handled by redirect flow -->
 <script src="https://accounts.google.com/gsi/client" async defer onload="window.GOOGLE_AUTH?GOOGLE_AUTH._onGSIReady():(window._gsiPending=true)"></script>
-  <!-- §7 v10.5: coi-serviceworker — enables SQLite+OPFS via file:// without local server -->
-    <script>
-// coi-serviceworker inline (v0.1.7 logic adapted for single-HTML use)
-    // Injects COOP/COEP headers via Service Worker for SharedArrayBuffer support
-    (function(){
-      if(typeof window==='undefined') return;
-      // Only register SW if not already active and we're in a context that supports it
-      if(!('serviceWorker' in navigator)) return;
-      const SW_SCRIPT = `
-        self.addEventListener('install', e => self.skipWaiting());
-        self.addEventListener('activate', e => e.waitUntil(clients.claim()));
-        self.addEventListener('fetch', function(e){
-          e.respondWith(
-            fetch(e.request).then(function(r){
-              if(r.status===0) return r;
-              const h = new Headers(r.headers);
-              h.set('Cross-Origin-Opener-Policy','same-origin');
-              h.set('Cross-Origin-Embedder-Policy','require-corp');
-              return new Response(r.body, {status:r.status, statusText:r.statusText, headers:h});
-            }).catch(()=>fetch(e.request))
-          );
-        });
-      `;
-      try{
-        const blob = new Blob([SW_SCRIPT], {type:'application/javascript'});
-        const url = URL.createObjectURL(blob);
-        navigator.serviceWorker.register(url).then(reg=>{
-          if(window.DEV_MODE) console.log('[COI-SW] Registered:', reg.scope);
-          if(reg.active) return;
-          // Reload once to activate COOP/COEP headers
-          if(!sessionStorage.getItem('coi_reload')){
-            sessionStorage.setItem('coi_reload','1');
-            setTimeout(()=>location.reload(), 200);
-          }
-        }).catch(e=>console.warn('[COI-SW] Registration failed:', e));
-      }catch(e){ console.warn('[COI-SW] SW init failed:', e); }
-    })();
-
-</script>
-
-  <!-- §6.1 v10.5: Decimal.js — lightweight decimal arithmetic for financial precision -->
-  <!-- §FIX-DECIMAL v10.6: DECIMAL_PRECISION now delegates to the live integer-cents engine -->
-  <!-- (_toCents/_fromCents/_mulCents) instead of redundant float-based operations.         -->
-  <!-- This eliminates the phantom-engine problem: declared precision that was never used.   -->
-    <script>
-// §v1.1.92: DEV_MODE flag — set to false for production (suppresses all console.log)
-    window.DEV_MODE = false;
-    // DECIMAL_PRECISION — unified bridge to the integer-cents engine.
-    // All methods below delegate to _toCents/_fromCents/_mulCents which are
-    // defined in the main JS block. At declaration time those globals are not
-    // yet available, so we lazily resolve them on first call via a getter shim.
-    window.DECIMAL_PRECISION = {
-      // Delegate to integer cents engine (defined in main JS block)
-      add:      (a,b)        => { const c=Math.round(parseFloat(a||0)*100)+Math.round(parseFloat(b||0)*100); return c/100; },
-      sub:      (a,b)        => { const c=Math.round(parseFloat(a||0)*100)-Math.round(parseFloat(b||0)*100); return c/100; },
-      mul:      (a,b)        => { const ac=Math.round(parseFloat(a||0)*100),bc=parseFloat(b||0); return Math.round(ac*bc)/100; },
-      div:      (a,b)        => b===0?0:Math.round((parseFloat(a||0)/parseFloat(b||0))*100)/100,
-      round2:   v            => Math.round(parseFloat(v||0)*100)/100,
-      toCents:  v            => Math.round(parseFloat(v||0)*100),
-      fromCents:v            => (parseInt(v||0)/100),
-      // Safe multiplication for invoice line items (cents-correct)
-      lineTotal:(qty,price)  => { const pc=Math.round(parseFloat(price||0)*100); return Math.round(pc*parseFloat(qty||0))/100; },
-      // Weighted average for profit allocation
-      proportion:(part,total,value)=> total===0?0:Math.round(parseFloat(part||0)/parseFloat(total||1)*parseFloat(value||0)*100)/100,
-    };
-    if(window.DEV_MODE) console.log('[DECIMAL] §FIX-DECIMAL v10.6: precision engine linked to integer-cents architecture');
-
-</script>
-
-  <!-- §7.2 v10.5: SQLite WASM — async secondary storage for advanced queries -->
-    <script>
-// SQLite is loaded asynchronously and used as READ-ONLY reporting layer
-    // Primary storage remains localStorage/IndexedDB unchanged
-    window.SQLITE_DB = null;
-    window.SQLITE_READY = false;
-    window.SQLITE_STATUS = 'pending';
-
-    async function initSQLite(){
-      try{
-        // Try loading SQLite WASM from CDN
-        const src = 'https://cdn.jsdelivr.net/npm/@sqlite.org/sqlite-wasm@3.46.0-build1/sqlite-wasm/jswasm/sqlite3.mjs';
-        const mod = await import(src).catch(()=>null);
-        if(!mod){ window.SQLITE_STATUS='unavailable'; return; }
-        const sqlite3 = await mod.default().catch(()=>null);
-        if(!sqlite3){ window.SQLITE_STATUS='init-failed'; return; }
-
-        // Use in-memory DB (OPFS requires SharedArrayBuffer from coi-serviceworker)
-        const useOPFS = typeof SharedArrayBuffer !== 'undefined';
-        if(useOPFS && sqlite3.oo1?.OpfsDb){
-          window.SQLITE_DB = new sqlite3.oo1.OpfsDb('/smartstore_pos.db');
-          window.SQLITE_STATUS = 'opfs';
-        } else {
-          window.SQLITE_DB = new sqlite3.oo1.DB(':memory:','c');
-          window.SQLITE_STATUS = 'memory';
-        }
-        await createSQLiteSchema();
-        window.SQLITE_READY = true;
-        if(window.DEV_MODE) console.log('[SQLite] Ready — mode:', window.SQLITE_STATUS);
-      }catch(e){
-        window.SQLITE_STATUS = 'error:'+e.message;
-        console.warn('[SQLite] Init failed (non-critical):', e.message);
-      }
-    }
-
-    async function createSQLiteSchema(){
-      if(!window.SQLITE_DB) return;
-      const db = window.SQLITE_DB;
-      try{
-        db.exec(`
-          CREATE TABLE IF NOT EXISTS invoices(id TEXT PRIMARY KEY, num TEXT, customer TEXT, total REAL, paid REAL, remain REAL, payType TEXT, date TEXT, status TEXT, items TEXT);
-          CREATE TABLE IF NOT EXISTS debts(id TEXT PRIMARY KEY, customer TEXT, invNum TEXT, total REAL, paid REAL, remain REAL, status TEXT, lastPay TEXT);
-          CREATE TABLE IF NOT EXISTS returns_t(id TEXT PRIMARY KEY, customer TEXT, inv TEXT, amt REAL, method TEXT, date TEXT, items TEXT);
-          CREATE TABLE IF NOT EXISTS payments(id TEXT PRIMARY KEY, customer TEXT, invNum TEXT, amt REAL, timestamp TEXT, method TEXT);
-          CREATE TABLE IF NOT EXISTS customers(id TEXT PRIMARY KEY, name TEXT, code TEXT, phone TEXT, balance REAL DEFAULT 0);
-          CREATE INDEX IF NOT EXISTS idx_inv_cust ON invoices(customer);
-          CREATE INDEX IF NOT EXISTS idx_debt_cust ON debts(customer);
-        `);
-      }catch(e){ console.warn('[SQLite] Schema error:', e.message); }
-    }
-
-    // Sync a single record to SQLite (called after IndexedDB writes)
-    window.SQLITE_SYNC = {
-      invoice(inv){
-        if(!window.SQLITE_READY||!window.SQLITE_DB) return;
-        try{
-          window.SQLITE_DB.exec({sql:`INSERT OR REPLACE INTO invoices VALUES(?,?,?,?,?,?,?,?,?,?)`,
-            bind:[inv.id,inv.num,inv.customer,parseFloat(inv.total||0),parseFloat(inv.paid||0),parseFloat(inv.remain||0),inv.payType||'',inv.date||'',inv.status||'',inv.items||'[]']});
-        }catch(_){}
-      },
-      debt(d){
-        if(!window.SQLITE_READY||!window.SQLITE_DB) return;
-        try{
-          window.SQLITE_DB.exec({sql:`INSERT OR REPLACE INTO debts VALUES(?,?,?,?,?,?,?,?)`,
-            bind:[d.id,d.customer,d.invNum||'',parseFloat(d.total||0),parseFloat(d.paid||0),parseFloat(d.remain||0),d.status||'',d.lastPay||'']});
-        }catch(_){}
-      },
-      // Bulk migrate all IndexedDB data to SQLite (one-time)
-      migrateAll(){
-        if(!window.SQLITE_READY||!window.SQLITE_DB) return Promise.resolve(0);
-        return new Promise(resolve=>{
-          try{
-            let count=0;
-            // Use DB object (localStorage-based) to read all records
-            ['INVOICES','DEBTS','RETURNS','CUSTOMERS'].forEach(tbl=>{
-              try{
-                const rows = JSON.parse(localStorage.getItem('spos_v4_'+tbl)||'[]');
-                rows.forEach(r=>{
-                  try{
-                    if(tbl==='INVOICES') window.SQLITE_SYNC.invoice(r);
-                    else if(tbl==='DEBTS') window.SQLITE_SYNC.debt(r);
-                    count++;
-                  }catch(_){}
-                });
-              }catch(_){}
-            });
-            if(window.DEV_MODE) console.log('[SQLite] Migration complete —', count, 'records synced');
-            resolve(count);
-          }catch(e){ console.warn('[SQLite] Migration error:', e); resolve(0); }
-        });
-      },
-      // Advanced query helper for reports
-      query(sql, params=[]){
-        if(!window.SQLITE_READY||!window.SQLITE_DB) return [];
-        try{
-          const rows=[];
-          window.SQLITE_DB.exec({sql, bind:params, rowMode:'object', callback:r=>rows.push(r)});
-          return rows;
-        }catch(e){ console.warn('[SQLite] Query error:', e.message); return []; }
-      }
-    };
-
-    // Auto-init SQLite after page load (non-blocking)
-    if(typeof window!=='undefined'){
-      window.addEventListener('load', ()=>{
-        setTimeout(()=>initSQLite().then(()=>{
-          if(window.SQLITE_READY) window.SQLITE_SYNC.migrateAll();
-        }), 1500);
-      });
-    }
-
-</script>
-
-<script>
-// §v1.1.80: Early binding — loginScreenRestore defined here so HTML buttons
-// that fire before main script loads never throw ReferenceError.
-// The real implementation overwrites this at line ~7365 after full load.
-function loginScreenRestore(){
-  if(typeof TOAST !== "undefined"){
-    if(!window._fbCurrentUser){
-      TOAST.warn("يرجى تسجيل الدخول أولاً باستخدام Google ثم استخدام زر الاستعادة");
-      return;
-    }
-    if(typeof DRIVE_SYNC !== "undefined") DRIVE_SYNC.restoreFromDrive();
-  } else {
-    // Script not yet fully loaded — queue after load
-    window.addEventListener("load", function(){ loginScreenRestore(); }, { once: true });
-  }
-}
-
-</script>
-<script>
-// §v1.2.02 — Eruda developer console — visible to ALL users (floating button bottom-left)
-// Developer gets full Eruda; others see nothing extra because eruda.init() only
-// shows its own UI — no app interference.
-(function(){
-  function _positionEruda(){
-    var entry = document.querySelector('#eruda .eruda-entry-btn');
-    if(entry){ entry.style.left='16px'; entry.style.bottom='16px'; entry.style.right='auto'; entry.style.top='auto'; }
-  }
-  function _loadEruda(){
-    if(window._erudaLoaded) return;
-    window._erudaLoaded = true;
-    var s = document.createElement('script');
-    s.src = 'https://cdn.jsdelivr.net/npm/eruda';
-    s.onload = function(){
-      eruda.init();
-      _positionEruda();
-      var _mo = new MutationObserver(function(){ _positionEruda(); });
-      _mo.observe(document.body, { childList:true, subtree:true });
-      setTimeout(function(){ _mo.disconnect(); }, 5000);
-    };
-    document.head.appendChild(s);
-  }
-  // Load immediately for everyone — no auth gate, no email check.
-  _loadEruda();
-})();
-
-</script>
-  <style>
-/* SmartStorePOS Gold v1.1.98 — All Styles */
-
-/* ─── Style Block 1 ─── */
+<style>
 :root{
   --bg:#0a0f1e;--bg2:#0f172a;--card:#131c35;--card2:#1a2440;--hover:#1e2d50;
   --blue:#3b82f6;--gold:#f59e0b;--gold2:#fbbf24;--green:#10b981;--red:#f43f5e;--cyan:#06b6d4;--violet:#8b5cf6;
@@ -1244,148 +1013,256 @@ select option{background:var(--card)}
 /* §v1.1.63: Admin actions column alignment */
 #page-admin .tw table th:last-child,
 #page-admin .tw table td:last-child { width:120px; text-align:center; white-space:nowrap; }
-
-/* ─── Style Block 2 ─── */
-body{font-family:Arial,sans-serif;direction:rtl;padding:20px;max-width:500px;margin:0 auto}
-    h2{color:#dc2626;border-bottom:2px solid #dc2626;padding-bottom:8px}
-    .row{display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid #f1f5f9}
-    .row strong{color:#1a2440}.total{font-size:16px;font-weight:800;color:#dc2626}
-    table{width:100%;border-collapse:collapse;margin:12px 0}
-    th,td{padding:8px;text-align:right;border:1px solid #e2e8f0}th{background:#f8fafc}
-    .badge{display:inline-block;padding:3px 8px;border-radius:4px;font-size:11px;background:#fef2f2;color:#dc2626}
-    @media print{button{display:none}}
-
-/* ─── Style Block 3 ─── */
-body{font-family:Arial,sans-serif;direction:rtl;padding:24px;max-width:520px;margin:0 auto}
-    h2{color:#dc2626;border-bottom:2px solid #dc2626;padding-bottom:8px}
-    .row{display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid #f1f5f9}
-    table{width:100%;border-collapse:collapse;margin:12px 0}
-    th,td{padding:8px;text-align:right;border:1px solid #e2e8f0}th{background:#f8fafc}
-    .total{font-size:16px;font-weight:800;color:#dc2626}
-    @media print{button{display:none}}
-
-/* ─── Style Block 4 ─── */
-*{box-sizing:border-box;margin:0;padding:0}
-    @page{size:A4 landscape;margin:12mm}
-    body{font-family:'Cairo',Arial,sans-serif;direction:rtl;color:#1f2937;background:#fff;font-size:11px;line-height:1.5}
-    .print-hdr{background:linear-gradient(135deg,#0a0f1e,#1a2440);color:#fff;padding:12px 18px;border-radius:8px;margin-bottom:12px;display:flex;justify-content:space-between;align-items:center}
-    .print-hdr .store{font-size:16px;font-weight:900;color:#f59e0b}
-    .print-hdr .meta{font-size:10px;color:#94a3b8;text-align:left}
-    .rpt-title{font-size:13px;font-weight:700;color:#1e2d50;margin-bottom:10px;padding-bottom:6px;border-bottom:2px solid #e5e7eb}
-    table{width:100%;border-collapse:collapse;margin-bottom:10px;font-size:10px}
-    thead tr{background:#1e2d50;color:#fff}
-    thead th{padding:6px 8px;font-weight:700;font-size:10px;white-space:nowrap}
-    tbody tr:nth-child(even){background:#f8fafc}
-    td{padding:4px 8px;border-bottom:1px solid #e5e7eb;vertical-align:middle}
-    .kgrid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:10px}
-    .kcard{background:#f8fafc;border:1px solid #e5e7eb;border-radius:6px;padding:8px;text-align:center}
-    .kcard .klbl{font-size:9px;color:#6b7280;margin-bottom:2px}
-    .kcard .kval{font-size:14px;font-weight:800;color:#1e2d50}
-    @media print{
-      body{-webkit-print-color-adjust:exact;print-color-adjust:exact}
-      tr{break-inside:avoid}
-      thead{display:table-header-group}
-      .no-print{display:none}
-    }
-
-/* ─── Style Block 5 ─── */
-*{box-sizing:border-box;margin:0;padding:0}
-    body{font-family:'Cairo',Arial,sans-serif;direction:rtl;color:#1f2937;background:#fff;font-size:12px;line-height:1.6}
-    .page{max-width:740px;margin:0 auto;padding:20px}
-    /* Header */
-    .hdr{background:linear-gradient(135deg,#0a0f1e,#1a2440);color:#fff;padding:18px 24px;border-radius:10px 10px 0 0;display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:18px}
-    .hdr-title{font-size:20px;font-weight:900;color:#f59e0b;margin-bottom:2px}
-    .hdr-sub{font-size:11px;color:#94a3b8}
-    /* Info grid */
-    .info-grid{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:14px}
-    .info-box{background:#f8faff;border:1px solid #dbe4ff;border-radius:8px;padding:12px}
-    .info-box.gold{background:#fff7ed;border-color:#fed7aa}
-    .info-box-title{font-weight:700;font-size:11px;margin-bottom:8px;text-transform:uppercase;letter-spacing:.5px}
-    .info-box-title.blue{color:#3b82f6}
-    .info-box-title.gold{color:#f59e0b}
-    .info-row{display:flex;justify-content:space-between;padding:2px 0;font-size:11px}
-    .info-row .lbl{color:#6b7280}
-    .info-row .val{font-weight:600}
-    /* Sections */
-    .section-title{font-weight:700;font-size:13px;color:#374151;margin:14px 0 6px;padding-bottom:4px;border-bottom:2px solid #3b82f6}
-    .section-title.green-accent{border-bottom-color:#10b981}
-    /* Tables */
-    table{width:100%;border-collapse:collapse;font-size:11px;margin-bottom:6px}
-    thead th{background:#3b82f6;color:#fff;padding:8px 10px;text-align:right;font-weight:700}
-    tbody tr:nth-child(even){background:#f0f4ff}
-    tbody td{padding:7px 10px;border-bottom:1px solid #e5e7eb}
-    tfoot td{background:#f3f4f6;font-weight:700;padding:8px 10px;border-top:2px solid #d1d5db}
-    .num{text-align:left;font-variant-numeric:tabular-nums}
-    .bold{font-weight:700}
-    .green{color:#10b981}
-    table.green thead th{background:#10b981}
-    /* Financial summary */
-    .fin-box{background:#f8faff;border:1px solid #dbe4ff;border-radius:8px;padding:12px;margin-bottom:12px}
-    .fin-row{display:flex;justify-content:space-between;padding:4px 0;font-size:12px;border-bottom:1px solid #e5e7eb}
-    .fin-row:last-child{border-bottom:none;font-weight:900;font-size:14px}
-    .fin-row .lbl{color:#6b7280}
-    /* Status banner */
-    .status-banner{padding:12px 16px;border-radius:8px;margin-bottom:12px;font-weight:800;font-size:14px;text-align:center;border:2px solid}
-    /* Misc */
-    .desc-box{background:#f8faff;border:1px solid #dbe4ff;border-radius:6px;padding:10px;white-space:pre-wrap;color:#374151;margin-bottom:6px}
-    .total-line{font-weight:700;font-size:13px;color:#3b82f6;margin-bottom:6px}
-    .notes-box{background:#fafafa;border:1px solid #e5e7eb;border-radius:6px;padding:10px;white-space:pre-wrap;font-size:11px;color:#6b7280}
-    .no-items{color:#9ca3af;font-style:italic;margin:6px 0}
-    .manual-badge{font-size:9px;color:#8b5cf6;margin-right:4px}
-    /* Footer */
-    .footer{text-align:center;color:#9ca3af;font-size:10px;margin-top:18px;padding-top:10px;border-top:1px solid #e5e7eb}
-    @media print{
-      body{-webkit-print-color-adjust:exact;print-color-adjust:exact}
-      .page{padding:10px}
-      .no-print{display:none}
-    }
-
-/* ─── Style Block 6 ─── */
-*{box-sizing:border-box;margin:0;padding:0}
-    @page{size:${isLand?'A4 landscape':'A4 portrait'};margin:14mm}
-    body{font-family:'Cairo',Arial,sans-serif;direction:rtl;color:#1f2937;background:#fff;font-size:11px;line-height:1.5}
-    .page{max-width:${isLand?'260mm':'180mm'};margin:0 auto;padding:10px}
-    /* Header */
-    .hdr{background:linear-gradient(135deg,#0a0f1e,#1a2440);color:#fff;padding:14px 20px;border-radius:10px;margin-bottom:14px;display:flex;justify-content:space-between;align-items:flex-start}
-    .hdr-right h1{font-size:18px;font-weight:900;color:#f59e0b;margin-bottom:2px}
-    .hdr-right .sub{font-size:10px;color:#94a3b8}
-    .hdr-left{text-align:left;font-size:10px;color:#94a3b8;line-height:1.7}
-    /* Table */
-    table{width:100%;border-collapse:collapse;margin-bottom:12px;font-size:10px}
-    thead tr{background:#1e2d50;color:#fff}
-    thead th{padding:7px 8px;font-weight:700;font-size:10px;white-space:nowrap}
-    tbody tr:nth-child(even){background:#f8fafc}
-    tbody tr:hover{background:#f0f4ff}
-    td{padding:5px 8px;border-bottom:1px solid #e5e7eb;vertical-align:middle}
-    /* Utility classes */
-    .center{text-align:center}
-    .num{text-align:left;font-family:monospace;font-size:10.5px}
-    .mono{font-family:monospace;font-size:10px}
-    .bold{font-weight:700}
-    .green{color:#16a34a;font-weight:600}
-    /* Summary footer */
-    .summary{margin-top:8px;border:1px solid #e5e7eb;border-radius:8px;overflow:hidden;max-width:320px;margin-right:auto}
-    .sum-row{display:flex;justify-content:space-between;padding:6px 12px;font-size:11px;font-weight:600;gap:16px}
-    .sum-row.dark{background:#1e2d50;color:#fff}
-    .sum-row.red{background:#dc2626;color:#fff}
-    .sum-row.green-bg{background:#16a34a;color:#fff}
-    .sum-row span:last-child{font-family:monospace;font-size:11px}
-    /* Print controls */
-    .no-print{margin-top:16px;text-align:center;padding:12px;background:#f8fafc;border-radius:8px;border:1px dashed #cbd5e1}
-    .btn-print{padding:9px 24px;background:#3b82f6;color:#fff;border:none;border-radius:7px;font-family:'Cairo',sans-serif;font-size:13px;font-weight:700;cursor:pointer;margin-left:8px}
-    .btn-close{padding:9px 18px;background:#6b7280;color:#fff;border:none;border-radius:7px;font-family:'Cairo',sans-serif;font-size:13px;font-weight:700;cursor:pointer}
-    .hint{font-size:10px;color:#6b7280;margin-top:6px}
-    @media print{.no-print{display:none}.page{max-width:100%;padding:0}tr{break-inside:avoid}thead{display:table-header-group}}
-
-
 </style>
+  <!-- §7 v10.5: coi-serviceworker — enables SQLite+OPFS via file:// without local server -->
+  <script>
+    // coi-serviceworker inline (v0.1.7 logic adapted for single-HTML use)
+    // Injects COOP/COEP headers via Service Worker for SharedArrayBuffer support
+    (function(){
+      if(typeof window==='undefined') return;
+      // Only register SW if not already active and we're in a context that supports it
+      if(!('serviceWorker' in navigator)) return;
+      const SW_SCRIPT = `
+        self.addEventListener('install', e => self.skipWaiting());
+        self.addEventListener('activate', e => e.waitUntil(clients.claim()));
+        self.addEventListener('fetch', function(e){
+          e.respondWith(
+            fetch(e.request).then(function(r){
+              if(r.status===0) return r;
+              const h = new Headers(r.headers);
+              h.set('Cross-Origin-Opener-Policy','same-origin');
+              h.set('Cross-Origin-Embedder-Policy','require-corp');
+              return new Response(r.body, {status:r.status, statusText:r.statusText, headers:h});
+            }).catch(()=>fetch(e.request))
+          );
+        });
+      `;
+      try{
+        const blob = new Blob([SW_SCRIPT], {type:'application/javascript'});
+        const url = URL.createObjectURL(blob);
+        navigator.serviceWorker.register(url).then(reg=>{
+          if(window.DEV_MODE) console.log('[COI-SW] Registered:', reg.scope);
+          if(reg.active) return;
+          // Reload once to activate COOP/COEP headers
+          if(!sessionStorage.getItem('coi_reload')){
+            sessionStorage.setItem('coi_reload','1');
+            setTimeout(()=>location.reload(), 200);
+          }
+        }).catch(e=>console.warn('[COI-SW] Registration failed:', e));
+      }catch(e){ console.warn('[COI-SW] SW init failed:', e); }
+    })();
+  </script>
+
+  <!-- §6.1 v10.5: Decimal.js — lightweight decimal arithmetic for financial precision -->
+  <!-- §FIX-DECIMAL v10.6: DECIMAL_PRECISION now delegates to the live integer-cents engine -->
+  <!-- (_toCents/_fromCents/_mulCents) instead of redundant float-based operations.         -->
+  <!-- This eliminates the phantom-engine problem: declared precision that was never used.   -->
+  <script>
+    // §v1.1.92: DEV_MODE flag — set to false for production (suppresses all console.log)
+    window.DEV_MODE = false;
+    // DECIMAL_PRECISION — unified bridge to the integer-cents engine.
+    // All methods below delegate to _toCents/_fromCents/_mulCents which are
+    // defined in the main JS block. At declaration time those globals are not
+    // yet available, so we lazily resolve them on first call via a getter shim.
+    window.DECIMAL_PRECISION = {
+      // Delegate to integer cents engine (defined in main JS block)
+      add:      (a,b)        => { const c=Math.round(parseFloat(a||0)*100)+Math.round(parseFloat(b||0)*100); return c/100; },
+      sub:      (a,b)        => { const c=Math.round(parseFloat(a||0)*100)-Math.round(parseFloat(b||0)*100); return c/100; },
+      mul:      (a,b)        => { const ac=Math.round(parseFloat(a||0)*100),bc=parseFloat(b||0); return Math.round(ac*bc)/100; },
+      div:      (a,b)        => b===0?0:Math.round((parseFloat(a||0)/parseFloat(b||0))*100)/100,
+      round2:   v            => Math.round(parseFloat(v||0)*100)/100,
+      toCents:  v            => Math.round(parseFloat(v||0)*100),
+      fromCents:v            => (parseInt(v||0)/100),
+      // Safe multiplication for invoice line items (cents-correct)
+      lineTotal:(qty,price)  => { const pc=Math.round(parseFloat(price||0)*100); return Math.round(pc*parseFloat(qty||0))/100; },
+      // Weighted average for profit allocation
+      proportion:(part,total,value)=> total===0?0:Math.round(parseFloat(part||0)/parseFloat(total||1)*parseFloat(value||0)*100)/100,
+    };
+    if(window.DEV_MODE) console.log('[DECIMAL] §FIX-DECIMAL v10.6: precision engine linked to integer-cents architecture');
+  </script>
+
+  <!-- §7.2 v10.5: SQLite WASM — async secondary storage for advanced queries -->
+  <script>
+    // SQLite is loaded asynchronously and used as READ-ONLY reporting layer
+    // Primary storage remains localStorage/IndexedDB unchanged
+    window.SQLITE_DB = null;
+    window.SQLITE_READY = false;
+    window.SQLITE_STATUS = 'pending';
+
+    async function initSQLite(){
+      try{
+        // Try loading SQLite WASM from CDN
+        const src = 'https://cdn.jsdelivr.net/npm/@sqlite.org/sqlite-wasm@3.46.0-build1/sqlite-wasm/jswasm/sqlite3.mjs';
+        const mod = await import(src).catch(()=>null);
+        if(!mod){ window.SQLITE_STATUS='unavailable'; return; }
+        const sqlite3 = await mod.default().catch(()=>null);
+        if(!sqlite3){ window.SQLITE_STATUS='init-failed'; return; }
+
+        // Use in-memory DB (OPFS requires SharedArrayBuffer from coi-serviceworker)
+        const useOPFS = typeof SharedArrayBuffer !== 'undefined';
+        if(useOPFS && sqlite3.oo1?.OpfsDb){
+          window.SQLITE_DB = new sqlite3.oo1.OpfsDb('/smartstore_pos.db');
+          window.SQLITE_STATUS = 'opfs';
+        } else {
+          window.SQLITE_DB = new sqlite3.oo1.DB(':memory:','c');
+          window.SQLITE_STATUS = 'memory';
+        }
+        await createSQLiteSchema();
+        window.SQLITE_READY = true;
+        if(window.DEV_MODE) console.log('[SQLite] Ready — mode:', window.SQLITE_STATUS);
+      }catch(e){
+        window.SQLITE_STATUS = 'error:'+e.message;
+        console.warn('[SQLite] Init failed (non-critical):', e.message);
+      }
+    }
+
+    async function createSQLiteSchema(){
+      if(!window.SQLITE_DB) return;
+      const db = window.SQLITE_DB;
+      try{
+        db.exec(`
+          CREATE TABLE IF NOT EXISTS invoices(id TEXT PRIMARY KEY, num TEXT, customer TEXT, total REAL, paid REAL, remain REAL, payType TEXT, date TEXT, status TEXT, items TEXT);
+          CREATE TABLE IF NOT EXISTS debts(id TEXT PRIMARY KEY, customer TEXT, invNum TEXT, total REAL, paid REAL, remain REAL, status TEXT, lastPay TEXT);
+          CREATE TABLE IF NOT EXISTS returns_t(id TEXT PRIMARY KEY, customer TEXT, inv TEXT, amt REAL, method TEXT, date TEXT, items TEXT);
+          CREATE TABLE IF NOT EXISTS payments(id TEXT PRIMARY KEY, customer TEXT, invNum TEXT, amt REAL, timestamp TEXT, method TEXT);
+          CREATE TABLE IF NOT EXISTS customers(id TEXT PRIMARY KEY, name TEXT, code TEXT, phone TEXT, balance REAL DEFAULT 0);
+          CREATE INDEX IF NOT EXISTS idx_inv_cust ON invoices(customer);
+          CREATE INDEX IF NOT EXISTS idx_debt_cust ON debts(customer);
+        `);
+      }catch(e){ console.warn('[SQLite] Schema error:', e.message); }
+    }
+
+    // Sync a single record to SQLite (called after IndexedDB writes)
+    window.SQLITE_SYNC = {
+      invoice(inv){
+        if(!window.SQLITE_READY||!window.SQLITE_DB) return;
+        try{
+          window.SQLITE_DB.exec({sql:`INSERT OR REPLACE INTO invoices VALUES(?,?,?,?,?,?,?,?,?,?)`,
+            bind:[inv.id,inv.num,inv.customer,parseFloat(inv.total||0),parseFloat(inv.paid||0),parseFloat(inv.remain||0),inv.payType||'',inv.date||'',inv.status||'',inv.items||'[]']});
+        }catch(_){}
+      },
+      debt(d){
+        if(!window.SQLITE_READY||!window.SQLITE_DB) return;
+        try{
+          window.SQLITE_DB.exec({sql:`INSERT OR REPLACE INTO debts VALUES(?,?,?,?,?,?,?,?)`,
+            bind:[d.id,d.customer,d.invNum||'',parseFloat(d.total||0),parseFloat(d.paid||0),parseFloat(d.remain||0),d.status||'',d.lastPay||'']});
+        }catch(_){}
+      },
+      // Bulk migrate all IndexedDB data to SQLite (one-time)
+      migrateAll(){
+        if(!window.SQLITE_READY||!window.SQLITE_DB) return Promise.resolve(0);
+        return new Promise(resolve=>{
+          try{
+            let count=0;
+            // Use DB object (localStorage-based) to read all records
+            ['INVOICES','DEBTS','RETURNS','CUSTOMERS'].forEach(tbl=>{
+              try{
+                const rows = JSON.parse(localStorage.getItem('spos_v4_'+tbl)||'[]');
+                rows.forEach(r=>{
+                  try{
+                    if(tbl==='INVOICES') window.SQLITE_SYNC.invoice(r);
+                    else if(tbl==='DEBTS') window.SQLITE_SYNC.debt(r);
+                    count++;
+                  }catch(_){}
+                });
+              }catch(_){}
+            });
+            if(window.DEV_MODE) console.log('[SQLite] Migration complete —', count, 'records synced');
+            resolve(count);
+          }catch(e){ console.warn('[SQLite] Migration error:', e); resolve(0); }
+        });
+      },
+      // Advanced query helper for reports
+      query(sql, params=[]){
+        if(!window.SQLITE_READY||!window.SQLITE_DB) return [];
+        try{
+          const rows=[];
+          window.SQLITE_DB.exec({sql, bind:params, rowMode:'object', callback:r=>rows.push(r)});
+          return rows;
+        }catch(e){ console.warn('[SQLite] Query error:', e.message); return []; }
+      }
+    };
+
+    // Auto-init SQLite after page load (non-blocking)
+    if(typeof window!=='undefined'){
+      window.addEventListener('load', ()=>{
+        setTimeout(()=>initSQLite().then(()=>{
+          if(window.SQLITE_READY) window.SQLITE_SYNC.migrateAll();
+        }), 1500);
+      });
+    }
+  </script>
+
+<script>
+// §v1.1.80: Early binding — loginScreenRestore defined here so HTML buttons
+// that fire before main script loads never throw ReferenceError.
+// The real implementation overwrites this at line ~7365 after full load.
+function loginScreenRestore(){
+  if(typeof TOAST !== "undefined"){
+    if(!window._fbCurrentUser){
+      TOAST.warn("يرجى تسجيل الدخول أولاً باستخدام Google ثم استخدام زر الاستعادة");
+      return;
+    }
+    if(typeof DRIVE_SYNC !== "undefined") DRIVE_SYNC.restoreFromDrive();
+  } else {
+    // Script not yet fully loaded — queue after load
+    window.addEventListener("load", function(){ loginScreenRestore(); }, { once: true });
+  }
+}
+</script>
+<script>
+// §22-FIX-ERUDA: Dev-only console — loads only for hamzaeldibo@gmail.com or ?dev=1
+(function(){
+  var DEV_EMAIL = 'hamzaeldibo@gmail.com';
+  var urlDev = (window.location.search.indexOf('dev=1') !== -1);
+
+  function _positionEruda(){
+    var entry = document.querySelector('#eruda .eruda-entry-btn');
+    if(entry){ entry.style.left='16px'; entry.style.bottom='16px'; entry.style.right='auto'; entry.style.top='auto'; }
+  }
+  function _loadEruda(){
+    if(window._erudaLoaded) return;
+    window._erudaLoaded = true;
+    var s = document.createElement('script');
+    s.src = 'https://cdn.jsdelivr.net/npm/eruda';
+    s.onload = function(){
+      eruda.init();
+      _positionEruda();
+      var _mo = new MutationObserver(function(){ _positionEruda(); });
+      _mo.observe(document.body, { childList:true, subtree:true });
+      setTimeout(function(){ _mo.disconnect(); }, 5000);
+    };
+    document.head.appendChild(s);
+  }
+
+  // Immediate load if ?dev=1 in URL (works before login)
+  if(urlDev){ _loadEruda(); return; }
+
+  // Otherwise: wait for Firebase Auth, then check email
+  var _attempts = 0;
+  var _poll = setInterval(function(){
+    _attempts++;
+    if(_attempts > 60){ clearInterval(_poll); return; } // give up after 30s
+    if(!window._fbAuth) return;
+    clearInterval(_poll);
+    window._fbAuth.onAuthStateChanged(function(user){
+      if(user && user.email === DEV_EMAIL){ _loadEruda(); }
+      else if(window._erudaLoaded){
+        // If wrong user signs in after load, hide the button
+        var btn = document.querySelector('#eruda .eruda-entry-btn');
+        if(btn) btn.style.display = 'none';
+      }
+    });
+  }, 500);
+})();
+</script>
 </head>
 <body>
 
 <!-- ═══ SETUP SCREEN (First Launch) ═══ -->
 <div class="screen" id="setupScreen">
   <div class="glass">
-    <div class="logo-c"><span class="em">🏪</span><h1>SmartStorePOS Gold</h1><p class="sub">نظام إدارة المتاجر الذكي</p><span class="vbadge">v1.1.98 — §FIX: CALC_CACHE incremental snapshot · EXPENSE_DELETED · hash chain</span></div>
+    <div class="logo-c"><span class="em">🏪</span><h1>SmartStorePOS Gold</h1><p class="sub">نظام إدارة المتاجر الذكي</p><span class="vbadge">v1.1.97 — §FIX: EXPENSE_DELETED audit trail · RETURN_DEBT_ADJ hash chain preserved</span></div>
     <div class="sdots"><div class="sdot act" id="d1"></div><div class="sdot" id="d2"></div></div>
 
     <!-- Step 1: Owner Google Login (sp0 removed — info merged into login card) -->
@@ -3635,11 +3512,12 @@ body{font-family:Arial,sans-serif;direction:rtl;padding:24px;max-width:520px;mar
 </div></div>
 
 
-<script>
-'use strict';
+<script data-cfasync="false" src="/cdn-cgi/scripts/5c5dd728/cloudflare-static/email-decode.min.js"></script><script data-cfasync="false" src="/cdn-cgi/scripts/5c5dd728/cloudflare-static/email-decode.min.js"></script><script data-cfasync="false" src="/cdn-cgi/scripts/5c5dd728/cloudflare-static/email-decode.min.js"></script><script data-cfasync="false" src="/cdn-cgi/scripts/5c5dd728/cloudflare-static/email-decode.min.js"></script><script data-cfasync="false" src="/cdn-cgi/scripts/5c5dd728/cloudflare-static/email-decode.min.js"></script><script>
 
-// ─── core_db.js ───
-
+// ════════════════════════════════════════════
+//  SmartStorePOS Gold v4.0
+//  db.js — Real DB Abstraction Engine
+// ════════════════════════════════════════════
 'use strict';
 const DB = (function(){
   const NS = 'spos_v4_';
@@ -3919,54 +3797,6 @@ const LEDGER_HASH = (function(){
 
   return { computeHash, chainEvent, verifyIntegrity, verifyBranch, getLastHash, exportHashAnchor, sha256, computeSHA256, verifySHA256Integrity, addSHA256 };
 })();
-
-// ══════════════════════════════════════════════════════════════════
-// §v1.1.98-CACHE: Incremental Snapshot Cache
-// Stores pre-computed totals in SETTINGS — avoids full recalc on
-// every Dashboard/Reports load when dataset is large (10,000+ events).
-// Safety: if cache invalid → full recalc fallback (no data risk).
-// ══════════════════════════════════════════════════════════════════
-const CALC_CACHE = {
-  KEY: 'financial_snapshot',
-  get(){
-    try{ const r=DB.findOne('SETTINGS',{key:this.KEY}); if(!r||!r.value) return null; return JSON.parse(r.value); }catch(_){ return null; }
-  },
-  set(snap){
-    try{ const e=DB.findOne('SETTINGS',{key:this.KEY}); const v=JSON.stringify(snap);
-      if(e) DB.update('SETTINGS',e.id,{value:v}); else DB.insert('SETTINGS',{key:this.KEY,value:v});
-    }catch(_){}
-  },
-  invalidate(){
-    try{ const e=DB.findOne('SETTINGS',{key:this.KEY}); if(e) DB.update('SETTINGS',e.id,{value:null}); }catch(_){}
-  },
-  isValid(snap){
-    if(!snap||!snap.lastEventId||!snap.builtAt) return false;
-    try{ const ev=EVENTS.all(); return ev.length>0 && ev[0].id===snap.lastEventId; }catch(_){ return false; }
-  },
-  rebuild(){
-    try{
-      const ev=EVENTS.all(); const newest=ev[0];
-      const snap={ totalSalesCents:Math.round(CALC.totalSales()*100), totalExpensesCents:Math.round(CALC.totalExpenses()*100), netRemainingDebtCents:Math.round(CALC.getOutstandingDebt().total*100), lastEventId:newest?newest.id:null, lastEventTimestamp:newest?newest.timestamp:null, builtAt:new Date().toISOString() };
-      this.set(snap); return snap;
-    }catch(_){ return null; }
-  },
-  getOrRebuild(){ const c=this.get(); return this.isValid(c)?c:this.rebuild(); },
-  onSale(grandCents, debtCents=0){
-    try{ const s=this.get(); if(!s) return; const ev=EVENTS.all(); const n=ev[0];
-      s.totalSalesCents+=grandCents; s.netRemainingDebtCents+=debtCents; s.lastEventId=n?n.id:s.lastEventId; s.lastEventTimestamp=n?n.timestamp:s.lastEventTimestamp; s.builtAt=new Date().toISOString(); this.set(s);
-    }catch(_){}
-  },
-  onExpense(amtCents){
-    try{ const s=this.get(); if(!s) return; const ev=EVENTS.all(); const n=ev[0];
-      s.totalExpensesCents+=amtCents; s.lastEventId=n?n.id:s.lastEventId; s.lastEventTimestamp=n?n.timestamp:s.lastEventTimestamp; s.builtAt=new Date().toISOString(); this.set(s);
-    }catch(_){}
-  },
-  onPayment(amtCents){
-    try{ const s=this.get(); if(!s) return; const ev=EVENTS.all(); const n=ev[0];
-      s.netRemainingDebtCents=Math.max(0,s.netRemainingDebtCents-amtCents); s.lastEventId=n?n.id:s.lastEventId; s.lastEventTimestamp=n?n.timestamp:s.lastEventTimestamp; s.builtAt=new Date().toISOString(); this.set(s);
-    }catch(_){}
-  }
-};
 
 const EVENTS = (function(){
   return {
@@ -4455,7 +4285,7 @@ function nowLocalFull(){
 // Schema version: bumped when DB structure changes.
 // ════════════════════════════════════════════════════════════════════
 const SCHEMA_VERSION = 3; // v3: integer cents storage, timestamp seq, two-phase migration
-const APP_VERSION    = '1.1.98'; // §v1.1.98: CALC_CACHE incremental snapshot | §v1.1.97: EXPENSE_DELETED log; RETURN_DEBT_ADJ hash chain | §v1.1.95: TOAST.err; Arabic PDFs; Admin stats; GSI guard
+const APP_VERSION    = '1.1.97'; // §v1.1.95: Fix TOAST.error→err; Sup/CashFlow PDF → Arabic _buildPrintDoc; Admin stats logic; GSI timing guard
 // ═══════════════════════════════════════════════════════════════════════
 // §ROOT-CAUSE-FIX v10.8 — NOTES/RETURNS UI NOT UPDATING (FINAL FIX)
 // ───────────────────────────────────────────────────────────────────────
@@ -4551,10 +4381,6 @@ function escapeHtml(unsafe) {
 // ────────────────────────────────────────────────────────────────────
 
 // Convert any input (string/float/int) → integer cents (safe)
-
-
-// ─── core_finance.js ───
-
 function _toCents(v){
   if(v===null||v===undefined||v==='') return 0;
   const n = typeof v === 'number' ? v : parseFloat(String(v).replace(/,/g,''));
@@ -6127,9 +5953,6 @@ const CALC = {
   }
 };
 
-
-// ─── auth.js ───
-
 const GOOGLE_AUTH = {
   _mode: 'setup',
   _gsiReady: false,
@@ -7361,9 +7184,6 @@ const BACKUP_LOCAL = {
   }
 };
 
-
-// ─── app.js ───
-
 const APP = {
   boot(){
     document.getElementById('main').style.display = 'none';
@@ -7466,8 +7286,6 @@ const APP = {
     document.getElementById('loginScreen').classList.add('hidden');
     document.getElementById('main').style.display = '';
     document.getElementById('sidebar').style.display = '';
-    // §v1.2.03-FIX: Always close sidebar on launch — on mobile it must start hidden
-    try{ closeSB(); }catch(_){}
     this.populateCats();
     // §FIX-CRITICAL-2: Sync customers from invoices once at launch (not in render)
     setTimeout(()=>{ try{ CUST_PAGE.syncCustomersFromInvoices(); }catch(_){} }, 500);
@@ -8339,10 +8157,6 @@ const DASH = {
   }
 }
 // ── POS ──
-
-
-// ─── pos.js ───
-
 const POS = {
   _cartLoaded: false, // §2-8 v1.1.85: flag — load from storage only once per session
   render(){
@@ -8670,8 +8484,6 @@ const POS = {
       const savedInv = DB.all('INVOICES').find(i=>i.num===num);
       if(savedInv) setTimeout(()=>DRIVE_SYNC.quickSync('SALE',{inv:savedInv}), 1000);
     }
-    // §v1.1.99-CACHE: update snapshot incrementally after sale (debtCents for credit/partial)
-    try{ CALC_CACHE.onSale(grandCents, Math.round(remain*100)); }catch(_){}
   },
   clear(){ CART=[]; clearCartStorage(); PAY_TYPE='cash'; document.querySelectorAll('.ptbtn').forEach(b=>b.classList.remove('act')); const first=document.querySelector('.ptbtn'); if(first) first.classList.add('act'); const pw=document.getElementById('partialWrap'); if(pw) pw.style.display='none'; UI.setVal('billCust',''); UI.setVal('billCustCode',''); UI.setVal('tDisc','0'); const cs=document.getElementById('custSuggest'); if(cs) cs.style.display='none'; const bn=document.getElementById('billNotes'); if(bn) bn.value=''; this.renderBill(); },
   suggestCustomer(q){
@@ -8850,10 +8662,6 @@ function _getCashierLineStandalone(){
 }
 
 // ── INVOICES ──
-
-
-// ─── invoices.js ───
-
 const INVS = {
   render(){
     // Sync all invoice paid/remain/status from payment events before rendering
@@ -9213,8 +9021,6 @@ const INVS = {
     }, AUTH.getSession()?.id);
 
     TOAST.ok(`✓ تم إلغاء الفاتورة ${inv.num} — تم تحديث المخزون والحسابات`);
-    // §v1.1.99-CACHE: void removes a sale (and possibly debt) — invalidate so next Dashboard load rebuilds
-    try{ CALC_CACHE.invalidate(); }catch(_){}
     this.render();
     // §PHASE2A: Refresh customer totals so voided invoice no longer counts
     try{ CUST_PAGE.render(); }catch(_){}
@@ -9731,8 +9537,6 @@ const RETS = {
           items:selectedItems.length, cashier:sess.name,
           invoicePayType:_retInvRef.payType
         }, sess.id);
-        // §v1.1.99-CACHE: return affects sales/debt totals — invalidate so next Dashboard load rebuilds
-        try{ CALC_CACHE.invalidate(); }catch(_){}
 
         // ── 5. Sync status ──
         try{ CALC.syncInvoiceStatus(_retInvRef.id); }catch(_syncErr){ console.warn('[RETS.save] syncInvoiceStatus non-critical error:', _syncErr.message); }
@@ -9782,8 +9586,6 @@ const RETS = {
     const r = { type:'مرتجع مبيع', date:todayISO(), customer:'', inv:_legacyInvNum, amt:0, method:UI.val('rMeth')||'cash', reason:UI.val('rReason')||'أخرى', status:'قيد المعالجة', invoicePayType:_legacyPayType, originalPaymentMethod:_legacyPayType };
     const saved=DB.insert('RETURNS',r);
     EVENTS.log('RETURN',{ id:saved.id, reason:r.reason, amt:r.amt },sess?.id);
-    // §v1.1.99-CACHE: return affects sales/debt totals — invalidate so next Dashboard load rebuilds
-    try{ CALC_CACHE.invalidate(); }catch(_){}
     UI.closeModal('retModal');
     UI.updateBadges(); TOAST.ok('✓ تم تسجيل المرتجع'); this.render();
   },
@@ -9979,10 +9781,6 @@ function saveReturn(m){ RETS.save(m); }
 function deleteReturn(id){ RETS.del(id); }
 
 // ── PRODUCTS ──
-
-
-// ─── inventory.js ───
-
 const PRODS = {
   render(){
     const srch=UI.val('prodSrch').toLowerCase(), cat=UI.val('prodCatF'), stat=UI.val('prodStatF'), s=getCurr();
@@ -10121,10 +9919,6 @@ function saveAdj(){ INVT.saveAdj(); }
 function openAdjFor(id){ INVT.openAdj(id); }
 
 // ── DEBTS ──
-
-
-// ─── debts.js ───
-
 const DEBTS = {
   _activeTab: 'customers', // track active tab
 
@@ -10424,8 +10218,6 @@ const DEBTS = {
     // This ensures invoice page ALWAYS reflects the payment, even if not active
     CALC.syncAllDebts();
     CALC.syncAllInvoices();
-    // §v1.1.98-CACHE: update snapshot incrementally after debt payment
-    try{ CALC_CACHE.onPayment(Math.round((amt+disc)*100)); }catch(_){}
     DASH.render();
     // Force invoice render regardless of active page (for next navigation)
     if(document.getElementById('page-invoices')?.classList.contains('act')) INVS.render();
@@ -10633,10 +10425,6 @@ function exportDebtsPDF(){
 }
 
 // ── EXPENSES ──
-
-
-// ─── expenses.js ───
-
 const EXPS = {
   // Generate sequential expense code based on category prefix
   _genCode(cat){
@@ -10921,8 +10709,6 @@ const EXPS = {
     EVENTS.log('EXPENSE',{ cat, code, desc, amt },s?.id);
     // Quick sync to Google Sheets if connected
     if(DRIVE_SYNC.isConnected()) setTimeout(()=>DRIVE_SYNC.quickSync('EXPENSE',{exp}), 1500);
-    // §v1.1.98-CACHE: update snapshot incrementally after expense
-    try{ CALC_CACHE.onExpense(Math.round(amt*100)); }catch(_){}
     // Reset code field for next entry
     const codeEl=document.getElementById('eCode'); if(codeEl) codeEl.value='';
     const newCatEl=document.getElementById('eNewCat'); if(newCatEl) newCatEl.value='';
@@ -10935,8 +10721,6 @@ const EXPS = {
     const exp = DB.all('EXPENSES').find(e=>e.id===id);
     DB.delete('EXPENSES',id);
     if(exp){ const sess=AUTH.session(); EVENTS.log('EXPENSE_DELETED',{amt:exp.amount,cat:exp.cat,desc:exp.desc,date:exp.date,code:exp.code||''},sess?.id); }
-    // §v1.1.98-CACHE: deletion → invalidate snapshot (full rebuild on next Dashboard load)
-    try{ CALC_CACHE.invalidate(); }catch(_){}
     this.render(); TOAST.ok('تم الحذف');
   }
 };
@@ -11510,10 +11294,6 @@ const EXPS_FILES = {
 // + Schema Migration + Portable Mode Storage
 // Zero UI changes. Hardening layer only.
 // ════════════════════════════════════════════════════════════════════
-
-
-// ─── financial_engine.js ───
-
 const FINANCIAL_ENGINE = {
 
   // ── Rebuild product stock deterministically from movement ledger ──
@@ -11722,25 +11502,12 @@ const FINANCIAL_ENGINE = {
     const grossProfitOnDebt   = all.reduce((a,d)=>a+d.grossProfit,0);
     const profitFromCollected = all.reduce((a,d)=>a+d.profitFromPaid,0);
 
-    // §v1.1.98-CACHE: try snapshot first, fall back to full recalc
-    let totalSales, totalExpenses, netProfit, totalReturns;
-    try{
-      const snap = CALC_CACHE.getOrRebuild();
-      if(snap && CALC_CACHE.isValid(snap)){
-        totalSales    = snap.totalSalesCents / 100;
-        totalExpenses = snap.totalExpensesCents / 100;
-        const _pnl    = CALC.pnl(); // still needed for COGS / net
-        netProfit     = _pnl.net;
-        totalReturns  = CALC.returnsBreakdown().totalReturns;
-      } else { throw new Error('cache_miss'); }
-    }catch(_){
-      // §FIX-OPS fallback: full recalc (original path — always correct)
-      totalSales    = CALC.totalSales();
-      totalExpenses = CALC.totalExpenses();
-      const _pnl4   = CALC.pnl();
-      netProfit     = _pnl4.net;
-      totalReturns  = CALC.returnsBreakdown().totalReturns;
-    }
+    // §FIX-OPS: جميع الأرقام المالية تأتي من CALC — المحرك الوحيد
+    const totalSales   = CALC.totalSales();
+    const totalExpenses= CALC.totalExpenses();
+    const _pnl4 = CALC.pnl();
+    const netProfit    = _pnl4.net;
+    const totalReturns = CALC.returnsBreakdown().totalReturns; // §PHASE4
 
     return {
       // New §3 metrics
@@ -11996,8 +11763,6 @@ const FINANCIAL_ENGINE = {
         invariantOk: inv.ok,
         failureCount: inv.failures.length
       }, sess?.id);
-      // §v1.1.98-CACHE: rebuild complete → invalidate stale snapshot, next load will rebuild it
-      try{ CALC_CACHE.invalidate(); }catch(_){}
 
       return { ok:true, before, after, invariants:inv, stockRebuilt: stockRebuildResult.rebuilt };
 
@@ -12495,10 +12260,6 @@ const FINANCIAL_ENGINE = {
 
 // ── JOURNALS ──
 let J_FILTER = 'all';
-
-
-// ─── journal.js ───
-
 const JRNL = {
   render(){
     const date=UI.val('jDate')||todayISO();
@@ -13896,10 +13657,6 @@ const STRESS_TEST = {
   }
 };
 // ── REPORTS ──
-
-
-// ─── reports.js ───
-
 const RPTS = {
   renderAll(){
     CALC.syncAllDebts();
@@ -16760,10 +16517,6 @@ function connectSheets(){ DRIVE_SYNC.requestAccess(); }
 // ── SYNC PAGE ──
 // ── ADMIN PAGE ──
 // ════════════════════════════════════════════════════════════════
-
-
-// ─── admin.js ───
-
 const ADMIN_PAGE = {
   _licMap:       {},   // §v1.1.66: cache of uid → license data (populated by render)
   _allUsers:     [],   // §v1.1.66: full user list for client-side filter
@@ -17416,10 +17169,6 @@ function triggerSync(){
 }
 
 // ── SETTINGS PAGE ──
-
-
-// ─── settings.js ───
-
 const SETT_PAGE = {
   // §v1.1.69: Show/hide PIN input fields based on toggle
   togglePinFields() {
@@ -18388,10 +18137,6 @@ const SYSTEM_TEST = {
 // ══════════════════════════════════════════════════════════════════
 // CUSTOMERS PAGE — Full ledger, credit balance, linked transactions
 // ══════════════════════════════════════════════════════════════════
-
-
-// ─── customers_notes.js ───
-
 const CUST_PAGE = {
   // §FIX-CRITICAL-2: One-time sync — moves DB.insert logic OUT of render().
   // Called once on app launch and after data import/restore. Never call from render().
@@ -18899,9 +18644,7 @@ document.addEventListener('DOMContentLoaded', ()=>{
 // ══════════════════════════════════════════════════════════════════════════
 (function() {
   // ── 1. Session state listener — runs immediately on every page load ──
-  // §v1.2.02-FIX: Wrapped in try/catch — if _fbAuth is undefined (Firebase SDK blocked
-  // by network/CSP), this no longer throws and kills the rest of the IIFE.
-  try { _fbAuth.onAuthStateChanged(function(fbUser) {
+  _fbAuth.onAuthStateChanged(function(fbUser) {
     window._fbCurrentUser = fbUser || null;
 
     if (fbUser) {
@@ -19014,7 +18757,7 @@ document.addEventListener('DOMContentLoaded', ()=>{
         APP.boot();
       }
     }
-  }); } catch(fbAuthErr) { console.error('[Firebase Auth] onAuthStateChanged setup failed:', fbAuthErr); }
+  });
 
   // ── License helpers (global) ──
 
@@ -19068,7 +18811,6 @@ document.addEventListener('DOMContentLoaded', ()=>{
       const fbName  = fbUser.displayName || fbUser.email.split('@')[0];
       const fbEmail = fbUser.email;
 
-      // ── Create or verify owner record ──
       if (!AUTH.hasOwner()) {
         AUTH.createOwner(fbEmail, fbName);
       } else {
@@ -19082,41 +18824,17 @@ document.addEventListener('DOMContentLoaded', ()=>{
       let s = AUTH.getSession();
       if (!s) s = AUTH.loginOwnerGoogle({ email: fbEmail, name: fbName });
 
-      if (!s) {
-        console.error('[Firebase Auth] Could not create local session.');
-        return;
-      }
-
-      // §v1.2.02-FIX: Check if store setup is complete.
-      // On first login ever, setupDone is false — show step 2 (store details) not full launch.
-      const cfg = getCfg();
-      if (!cfg.setupDone) {
-        // Hide login, show setup screen at step 2 (store details)
-        const loginScreen  = document.getElementById('loginScreen');
-        const setupScreen  = document.getElementById('setupScreen');
-        if (loginScreen)  loginScreen.classList.add('hidden');
-        if (setupScreen)  setupScreen.classList.remove('hidden');
-        // Activate step 2 panel
-        ['sp1','sp2'].forEach(function(p){ const el=document.getElementById(p); if(el) el.classList.remove('act'); });
-        const sp2 = document.getElementById('sp2'); if(sp2) sp2.classList.add('act');
-        ['d1','d2'].forEach(function(d){ const el=document.getElementById(d); if(el){ el.classList.remove('act','done'); }});
-        const d2 = document.getElementById('d2'); if(d2){ d2.classList.add('act'); }
-        // Pre-fill owner badge
-        const badge = document.getElementById('ownerConfBadge');
-        if(badge){ badge.textContent = '✓ ' + fbName + ' (' + fbEmail + ')'; badge.style.display = 'block'; }
+      if (s) {
+        const setupScreen = document.getElementById('setupScreen');
+        const loginScreen = document.getElementById('loginScreen');
+        if (setupScreen) setupScreen.classList.add('hidden');
+        if (loginScreen) loginScreen.classList.add('hidden');
         APP.applySession(s);
-        if(window.DEV_MODE) console.log('[Firebase Auth] First-time setup — showing store details for:', fbEmail);
-        return;
+        APP.launch();
+        if(window.DEV_MODE) console.log('[Firebase Auth] ✓ App launched for:', fbEmail);
+      } else {
+        console.error('[Firebase Auth] Could not create local session.');
       }
-
-      // ── Setup complete — launch the app normally ──
-      const setupScreen = document.getElementById('setupScreen');
-      const loginScreen = document.getElementById('loginScreen');
-      if (setupScreen) setupScreen.classList.add('hidden');
-      if (loginScreen) loginScreen.classList.add('hidden');
-      APP.applySession(s);
-      APP.launch();
-      if(window.DEV_MODE) console.log('[Firebase Auth] ✓ App launched for:', fbEmail);
     } catch(launchErr) {
       console.error('[Firebase Auth] Launch error:', launchErr);
     }
@@ -19265,75 +18983,63 @@ document.addEventListener('DOMContentLoaded', ()=>{
     if(window.DEV_MODE) console.log('[LicenseWatchdog] Started — checks every 24h + on reconnect');
   };
 
-  // ── 3. Handle redirect result on page load ──
-  try {
-    _fbAuth.getRedirectResult()
-      .then(function(result) {
-        if (result && result.user) {
-          if(window.DEV_MODE) console.log('[Firebase Auth] Redirect sign-in success:', result.user.email);
-        }
-      })
-      .catch(function(err) {
-        console.error('[Firebase Auth] Redirect sign-in error:', err);
-      });
-  } catch(e) { console.error('[Firebase Auth] getRedirectResult failed:', e); }
+  // ── 2. Hijack loginGoogleBtn to use Firebase popup ──
+  document.addEventListener('DOMContentLoaded', function() {
+    // §v1.1.51: Attach Firebase popup handler to BOTH login and setup Google buttons
+    ['loginGoogleBtn', 'setupGoogleBtn'].forEach(function(btnId) {
+      const btn = document.getElementById(btnId);
+      if (!btn) return;
 
-})();
+      btn.addEventListener('click', function(e) {
+        e.preventDefault();
+        e.stopImmediatePropagation();
 
-// ══════════════════════════════════════════════════════════════════════════
-// §v1.2.03 — Google button click handler — signInWithPopup (primary)
-// signInWithRedirect was unreliable: modern browsers block the cross-origin
-// cookies Firebase v8 uses to pass auth state back, so getRedirectResult()
-// always returned null. Now that the domain is authorised in Firebase Console,
-// signInWithPopup works correctly and is the right method to use.
-// ══════════════════════════════════════════════════════════════════════════
-(function() {
-  ['loginGoogleBtn', 'setupGoogleBtn'].forEach(function(btnId) {
-    var btn = document.getElementById(btnId);
-    if (!btn) return;
+        const provider = new firebase.auth.GoogleAuthProvider();
+        provider.setCustomParameters({ prompt: 'select_account' });
 
-    btn.addEventListener('click', function(e) {
-      e.preventDefault();
-      e.stopImmediatePropagation();
+        btn.disabled = true;
+        btn.style.opacity = '0.6';
 
-      if (!window._fbAuth) {
-        console.error('[Firebase Auth] _fbAuth not ready — cannot sign in.');
-        var lErr = document.getElementById('lErr');
-        if (lErr) { lErr.textContent = 'خطأ: Firebase غير مهيّأ — حاول تحديث الصفحة'; lErr.classList.add('show'); }
-        return;
-      }
-
-      var provider = new firebase.auth.GoogleAuthProvider();
-      provider.setCustomParameters({ prompt: 'select_account' });
-
-      btn.disabled = true;
-      btn.style.opacity = '0.6';
-
-      _fbAuth.signInWithPopup(provider)
-        .then(function(result) {
-          if(window.DEV_MODE) console.log('[Firebase Auth] Popup sign-in success:', result.user.email);
-          // onAuthStateChanged will fire and drive the full launch flow
-        })
-        .catch(function(err) {
-          btn.disabled = false;
-          btn.style.opacity = '';
-          if (err.code === 'auth/popup-closed-by-user' || err.code === 'auth/cancelled-popup-request') {
-            console.info('[Firebase Auth] Popup closed by user.');
-          } else if (err.code === 'auth/popup-blocked') {
-            // Fallback to redirect if popup is blocked by browser
-            console.warn('[Firebase Auth] Popup blocked — falling back to redirect.');
-            _fbAuth.signInWithRedirect(provider);
-          } else {
-            console.error('[Firebase Auth] Sign-in error:', err.code, err.message);
-            var lErr = document.getElementById('lErr');
-            if (lErr) { lErr.textContent = 'خطأ في تسجيل الدخول: ' + (err.code || err.message); lErr.classList.add('show'); }
-          }
-        });
-    }, true); // capture phase
+        _fbAuth.signInWithPopup(provider)
+          .then(function(result) {
+            if(window.DEV_MODE) console.log('[Firebase Auth] Popup sign-in success:', result.user.email);
+            // onAuthStateChanged will handle launch
+          })
+          .catch(function(err) {
+            btn.disabled = false;
+            btn.style.opacity = '';
+            if (err.code === 'auth/popup-closed-by-user' || err.code === 'auth/cancelled-popup-request') {
+              console.info('[Firebase Auth] Popup closed by user.');
+            } else if (err.code === 'auth/popup-blocked') {
+              console.warn('[Firebase Auth] Popup blocked — falling back to redirect.');
+              _fbAuth.signInWithRedirect(provider);
+            } else {
+              console.error('[Firebase Auth] Sign-in error:', err);
+              const lErr = document.getElementById('lErr');
+              if (lErr) {
+                lErr.textContent = 'فشل تسجيل الدخول: ' + (err.message || err.code);
+                lErr.classList.add('show');
+              }
+            }
+          });
+      }, true); // capture phase — fires before any inline onclick
+    });
   });
+
+  // ── 3. Handle redirect result (in case popup was blocked and browser redirected)
+  _fbAuth.getRedirectResult()
+    .then(function(result) {
+      if (result && result.user) {
+        if(window.DEV_MODE) console.log('[Firebase Auth] Redirect sign-in success:', result.user.email);
+        // onAuthStateChanged will fire and handle launch
+    
+      }
+    })
+    .catch(function(err) {
+      console.error('[Firebase Auth] Redirect sign-in error:', err);
+    });
+
 })();
-
-
 </script>
-
+</body>
 </html>
