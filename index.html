@@ -1262,7 +1262,7 @@ function loginScreenRestore(){
 <!-- ═══ SETUP SCREEN (First Launch) ═══ -->
 <div class="screen" id="setupScreen">
   <div class="glass">
-    <div class="logo-c"><span class="em">🏪</span><h1>SmartStorePOS Gold</h1><p class="sub">نظام إدارة المتاجر الذكي</p><span class="vbadge">v1.1.97 — §FIX: EXPENSE_DELETED audit trail · RETURN_DEBT_ADJ hash chain preserved</span></div>
+    <div class="logo-c"><span class="em">🏪</span><h1>SmartStorePOS Gold</h1><p class="sub">نظام إدارة المتاجر الذكي</p><span class="vbadge">v1.1.98 — §FIX: CALC_CACHE incremental snapshot · EXPENSE_DELETED · hash chain</span></div>
     <div class="sdots"><div class="sdot act" id="d1"></div><div class="sdot" id="d2"></div></div>
 
     <!-- Step 1: Owner Google Login (sp0 removed — info merged into login card) -->
@@ -3798,6 +3798,54 @@ const LEDGER_HASH = (function(){
   return { computeHash, chainEvent, verifyIntegrity, verifyBranch, getLastHash, exportHashAnchor, sha256, computeSHA256, verifySHA256Integrity, addSHA256 };
 })();
 
+// ══════════════════════════════════════════════════════════════════
+// §v1.1.98-CACHE: Incremental Snapshot Cache
+// Stores pre-computed totals in SETTINGS — avoids full recalc on
+// every Dashboard/Reports load when dataset is large (10,000+ events).
+// Safety: if cache invalid → full recalc fallback (no data risk).
+// ══════════════════════════════════════════════════════════════════
+const CALC_CACHE = {
+  KEY: 'financial_snapshot',
+  get(){
+    try{ const r=DB.findOne('SETTINGS',{key:this.KEY}); if(!r||!r.value) return null; return JSON.parse(r.value); }catch(_){ return null; }
+  },
+  set(snap){
+    try{ const e=DB.findOne('SETTINGS',{key:this.KEY}); const v=JSON.stringify(snap);
+      if(e) DB.update('SETTINGS',e.id,{value:v}); else DB.insert('SETTINGS',{key:this.KEY,value:v});
+    }catch(_){}
+  },
+  invalidate(){
+    try{ const e=DB.findOne('SETTINGS',{key:this.KEY}); if(e) DB.update('SETTINGS',e.id,{value:null}); }catch(_){}
+  },
+  isValid(snap){
+    if(!snap||!snap.lastEventId||!snap.builtAt) return false;
+    try{ const ev=EVENTS.all(); return ev.length>0 && ev[0].id===snap.lastEventId; }catch(_){ return false; }
+  },
+  rebuild(){
+    try{
+      const ev=EVENTS.all(); const newest=ev[0];
+      const snap={ totalSalesCents:Math.round(CALC.totalSales()*100), totalExpensesCents:Math.round(CALC.totalExpenses()*100), netRemainingDebtCents:Math.round(CALC.getOutstandingDebt().total*100), lastEventId:newest?newest.id:null, lastEventTimestamp:newest?newest.timestamp:null, builtAt:new Date().toISOString() };
+      this.set(snap); return snap;
+    }catch(_){ return null; }
+  },
+  getOrRebuild(){ const c=this.get(); return this.isValid(c)?c:this.rebuild(); },
+  onSale(grandCents){
+    try{ const s=this.get(); if(!s) return; const ev=EVENTS.all(); const n=ev[0];
+      s.totalSalesCents+=grandCents; s.lastEventId=n?n.id:s.lastEventId; s.lastEventTimestamp=n?n.timestamp:s.lastEventTimestamp; s.builtAt=new Date().toISOString(); this.set(s);
+    }catch(_){}
+  },
+  onExpense(amtCents){
+    try{ const s=this.get(); if(!s) return; const ev=EVENTS.all(); const n=ev[0];
+      s.totalExpensesCents+=amtCents; s.lastEventId=n?n.id:s.lastEventId; s.lastEventTimestamp=n?n.timestamp:s.lastEventTimestamp; s.builtAt=new Date().toISOString(); this.set(s);
+    }catch(_){}
+  },
+  onPayment(amtCents){
+    try{ const s=this.get(); if(!s) return; const ev=EVENTS.all(); const n=ev[0];
+      s.netRemainingDebtCents=Math.max(0,s.netRemainingDebtCents-amtCents); s.lastEventId=n?n.id:s.lastEventId; s.lastEventTimestamp=n?n.timestamp:s.lastEventTimestamp; s.builtAt=new Date().toISOString(); this.set(s);
+    }catch(_){}
+  }
+};
+
 const EVENTS = (function(){
   return {
     log(type, payload, user_id){
@@ -4285,7 +4333,7 @@ function nowLocalFull(){
 // Schema version: bumped when DB structure changes.
 // ════════════════════════════════════════════════════════════════════
 const SCHEMA_VERSION = 3; // v3: integer cents storage, timestamp seq, two-phase migration
-const APP_VERSION    = '1.1.97'; // §v1.1.95: Fix TOAST.error→err; Sup/CashFlow PDF → Arabic _buildPrintDoc; Admin stats logic; GSI timing guard
+const APP_VERSION    = '1.1.98'; // §v1.1.98: CALC_CACHE incremental snapshot | §v1.1.97: EXPENSE_DELETED log; RETURN_DEBT_ADJ hash chain | §v1.1.95: TOAST.err; Arabic PDFs; Admin stats; GSI guard
 // ═══════════════════════════════════════════════════════════════════════
 // §ROOT-CAUSE-FIX v10.8 — NOTES/RETURNS UI NOT UPDATING (FINAL FIX)
 // ───────────────────────────────────────────────────────────────────────
@@ -8484,6 +8532,8 @@ const POS = {
       const savedInv = DB.all('INVOICES').find(i=>i.num===num);
       if(savedInv) setTimeout(()=>DRIVE_SYNC.quickSync('SALE',{inv:savedInv}), 1000);
     }
+    // §v1.1.98-CACHE: update snapshot incrementally after sale
+    try{ CALC_CACHE.onSale(grandCents); }catch(_){}
   },
   clear(){ CART=[]; clearCartStorage(); PAY_TYPE='cash'; document.querySelectorAll('.ptbtn').forEach(b=>b.classList.remove('act')); const first=document.querySelector('.ptbtn'); if(first) first.classList.add('act'); const pw=document.getElementById('partialWrap'); if(pw) pw.style.display='none'; UI.setVal('billCust',''); UI.setVal('billCustCode',''); UI.setVal('tDisc','0'); const cs=document.getElementById('custSuggest'); if(cs) cs.style.display='none'; const bn=document.getElementById('billNotes'); if(bn) bn.value=''; this.renderBill(); },
   suggestCustomer(q){
@@ -10218,6 +10268,8 @@ const DEBTS = {
     // This ensures invoice page ALWAYS reflects the payment, even if not active
     CALC.syncAllDebts();
     CALC.syncAllInvoices();
+    // §v1.1.98-CACHE: update snapshot incrementally after debt payment
+    try{ CALC_CACHE.onPayment(Math.round((amt+disc)*100)); }catch(_){}
     DASH.render();
     // Force invoice render regardless of active page (for next navigation)
     if(document.getElementById('page-invoices')?.classList.contains('act')) INVS.render();
@@ -10709,6 +10761,8 @@ const EXPS = {
     EVENTS.log('EXPENSE',{ cat, code, desc, amt },s?.id);
     // Quick sync to Google Sheets if connected
     if(DRIVE_SYNC.isConnected()) setTimeout(()=>DRIVE_SYNC.quickSync('EXPENSE',{exp}), 1500);
+    // §v1.1.98-CACHE: update snapshot incrementally after expense
+    try{ CALC_CACHE.onExpense(Math.round(amt*100)); }catch(_){}
     // Reset code field for next entry
     const codeEl=document.getElementById('eCode'); if(codeEl) codeEl.value='';
     const newCatEl=document.getElementById('eNewCat'); if(newCatEl) newCatEl.value='';
@@ -10721,6 +10775,8 @@ const EXPS = {
     const exp = DB.all('EXPENSES').find(e=>e.id===id);
     DB.delete('EXPENSES',id);
     if(exp){ const sess=AUTH.session(); EVENTS.log('EXPENSE_DELETED',{amt:exp.amount,cat:exp.cat,desc:exp.desc,date:exp.date,code:exp.code||''},sess?.id); }
+    // §v1.1.98-CACHE: deletion → invalidate snapshot (full rebuild on next Dashboard load)
+    try{ CALC_CACHE.invalidate(); }catch(_){}
     this.render(); TOAST.ok('تم الحذف');
   }
 };
@@ -11502,12 +11558,25 @@ const FINANCIAL_ENGINE = {
     const grossProfitOnDebt   = all.reduce((a,d)=>a+d.grossProfit,0);
     const profitFromCollected = all.reduce((a,d)=>a+d.profitFromPaid,0);
 
-    // §FIX-OPS: جميع الأرقام المالية تأتي من CALC — المحرك الوحيد
-    const totalSales   = CALC.totalSales();
-    const totalExpenses= CALC.totalExpenses();
-    const _pnl4 = CALC.pnl();
-    const netProfit    = _pnl4.net;
-    const totalReturns = CALC.returnsBreakdown().totalReturns; // §PHASE4
+    // §v1.1.98-CACHE: try snapshot first, fall back to full recalc
+    let totalSales, totalExpenses, netProfit, totalReturns;
+    try{
+      const snap = CALC_CACHE.getOrRebuild();
+      if(snap && CALC_CACHE.isValid(snap)){
+        totalSales    = snap.totalSalesCents / 100;
+        totalExpenses = snap.totalExpensesCents / 100;
+        const _pnl    = CALC.pnl(); // still needed for COGS / net
+        netProfit     = _pnl.net;
+        totalReturns  = CALC.returnsBreakdown().totalReturns;
+      } else { throw new Error('cache_miss'); }
+    }catch(_){
+      // §FIX-OPS fallback: full recalc (original path — always correct)
+      totalSales    = CALC.totalSales();
+      totalExpenses = CALC.totalExpenses();
+      const _pnl4   = CALC.pnl();
+      netProfit     = _pnl4.net;
+      totalReturns  = CALC.returnsBreakdown().totalReturns;
+    }
 
     return {
       // New §3 metrics
@@ -11763,6 +11832,8 @@ const FINANCIAL_ENGINE = {
         invariantOk: inv.ok,
         failureCount: inv.failures.length
       }, sess?.id);
+      // §v1.1.98-CACHE: rebuild complete → invalidate stale snapshot, next load will rebuild it
+      try{ CALC_CACHE.invalidate(); }catch(_){}
 
       return { ok:true, before, after, invariants:inv, stockRebuilt: stockRebuildResult.rebuilt };
 
